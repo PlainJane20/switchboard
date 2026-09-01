@@ -18,12 +18,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ["SWITCHBOARD_MOCK"] = "1"
 
+from unittest.mock import MagicMock, patch  # noqa: E402
+
 from switchboard import attempts as attempts_mod  # noqa: E402
+from switchboard import claude_runtime  # noqa: E402
 from switchboard import debate as debate_mod  # noqa: E402
+from switchboard import dispatch as dispatch_mod  # noqa: E402
 from switchboard import memory, registry, router  # noqa: E402
 from switchboard import schedule as schedule_mod  # noqa: E402
 from switchboard import talk, tickets  # noqa: E402
-from switchboard.models import Correction, RouteDecision, Schedule  # noqa: E402
+from switchboard.models import AgentEntry, Correction, RouteDecision, Schedule  # noqa: E402
 
 AGENT_FIXTURE = """---
 id: test-agent
@@ -345,6 +349,208 @@ def test_debate_transcript_is_written(tmp_path):
     content = path.read_text()
     assert "I'll take it." in content
     assert "Disagree, here's why." in content
+
+
+# --- claude_runtime.py -------------------------------------------------------
+# Fixtures below are real captured output from actual `claude -p` invocations
+# during development (see ARCHITECTURE.md), not hand-authored guesses.
+
+REAL_CAPTURED_JSON = (
+    '{"is_error":false,"duration_api_ms":4124,"num_turns":1,"stop_reason":"end_turn",'
+    '"session_id":"0cc73525-7969-45c1-868d-28a64836c35d","total_cost_usd":0.030188120000000002,'
+    '"result":"hello world","type":"result"}'
+)
+
+REAL_WARNING_PREFIXED_OUTPUT = (
+    "Warning: claude.ai MCP server blocked by enterprise policy: claude.ai Google Drive\n"
+    + REAL_CAPTURED_JSON
+)
+
+
+def test_parse_result_json_on_real_captured_output():
+    data = claude_runtime._parse_result_json(REAL_CAPTURED_JSON)
+    assert data["result"] == "hello world"
+    assert data["is_error"] is False
+    assert data["session_id"] == "0cc73525-7969-45c1-868d-28a64836c35d"
+
+
+def test_parse_result_json_falls_back_past_a_warning_line():
+    """A real MCP-blocked warning was observed printing to the same stream
+    ahead of the JSON during development -- the parser must not choke on it."""
+    data = claude_runtime._parse_result_json(REAL_WARNING_PREFIXED_OUTPUT)
+    assert data["result"] == "hello world"
+
+
+def test_parse_result_json_raises_clearly_on_garbage():
+    with pytest.raises(ValueError, match="could not parse"):
+        claude_runtime._parse_result_json("not json at all")
+
+
+def test_parse_result_json_raises_on_empty_output():
+    with pytest.raises(ValueError, match="no stdout"):
+        claude_runtime._parse_result_json("   ")
+
+
+def test_run_session_raises_on_nonzero_exit():
+    fake_process = MagicMock()
+    fake_process.pid = 4242
+    fake_process.communicate.return_value = ("", "some real error")
+    fake_process.returncode = 1
+
+    with patch("subprocess.Popen", return_value=fake_process):
+        with pytest.raises(RuntimeError, match="exited 1"):
+            claude_runtime.run_session(prompt="hi")
+
+
+def test_run_session_invokes_pid_callback_before_communicate():
+    fake_process = MagicMock()
+    fake_process.pid = 9999
+    fake_process.communicate.return_value = (REAL_CAPTURED_JSON, "")
+    fake_process.returncode = 0
+
+    seen_pids = []
+    with patch("subprocess.Popen", return_value=fake_process):
+        result = claude_runtime.run_session(prompt="hi", pid_callback=seen_pids.append)
+
+    assert seen_pids == [9999]
+    assert result.result_text == "hello world"
+    assert result.session_id == "0cc73525-7969-45c1-868d-28a64836c35d"
+
+
+def test_run_session_builds_expected_command_with_options():
+    fake_process = MagicMock()
+    fake_process.pid = 1
+    fake_process.communicate.return_value = (REAL_CAPTURED_JSON, "")
+    fake_process.returncode = 0
+
+    with patch("subprocess.Popen", return_value=fake_process) as mock_popen:
+        claude_runtime.run_session(
+            prompt="do the thing", system_prompt="You are X.", allowed_tools=["Read", "Grep"]
+        )
+
+    args = mock_popen.call_args[0][0]
+    assert args[:3] == ["claude", "-p", "do the thing"]
+    assert "--append-system-prompt" in args and "You are X." in args
+    assert "--allowedTools" in args and "Read,Grep" in args
+    # never the full-bypass flag, regardless of options passed
+    assert "--dangerously-skip-permissions" not in args
+
+
+# --- dispatch.py (claude_code runtime) ---------------------------------------
+
+CLAUDE_CODE_AGENT = AgentEntry(
+    id="research-assistant", name="Research Assistant", repo="https://example.com/r",
+    runtime="claude_code", cwd=None, allowed_tools=["Read"], tags=["research"], risk_tier="medium",
+)
+
+
+def test_dispatch_claude_code_prints_without_running(capsys, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    ticket = tickets.new_ticket(title="Research this", tags=["research"])
+    result = dispatch_mod.dispatch(CLAUDE_CODE_AGENT, ticket, ticket_path=None, run=False)
+    assert result is None
+    assert "Prepared" in capsys.readouterr().out
+
+
+def test_dispatch_claude_code_records_successful_attempt(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    ticket = tickets.new_ticket(title="Research this", tags=["research"])
+
+    fake_result = claude_runtime.ClaudeCodeResult(
+        is_error=False, result_text="The answer.", session_id="sess-1",
+        cost_usd=0.01, returncode=0, pid=555,
+    )
+
+    def fake_run_session(*, prompt, cwd, system_prompt, allowed_tools, pid_callback=None, **kw):
+        if pid_callback:
+            pid_callback(555)
+        return fake_result
+
+    with patch.object(claude_runtime, "run_session", side_effect=fake_run_session):
+        attempt = dispatch_mod.dispatch(CLAUDE_CODE_AGENT, ticket, ticket_path=Path("x"), run=True)
+
+    assert attempt.status == "succeeded"
+    assert attempt.result_text == "The answer."
+    assert attempt.session_id == "sess-1"
+    assert attempt.cost_usd == 0.01
+    assert attempt.pid == 555
+
+
+def test_dispatch_claude_code_records_failed_attempt_when_session_raises(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    ticket = tickets.new_ticket(title="Research this", tags=["research"])
+
+    with patch.object(claude_runtime, "run_session", side_effect=RuntimeError("claude -p exited 1")):
+        attempt = dispatch_mod.dispatch(CLAUDE_CODE_AGENT, ticket, ticket_path=Path("x"), run=True)
+
+    assert attempt.status == "failed"
+    assert "exited 1" in attempt.result_text
+
+
+# --- schedule.py install/uninstall -------------------------------------------
+
+INSTALL_SCHEDULE = Schedule(
+    id="test-sched", description="Test schedule", agent_id="a", cron="0 8 * * *"
+)
+
+
+def test_install_launchd_dry_run_writes_nothing(tmp_path):
+    target_dir = tmp_path / "LaunchAgents"
+    result = schedule_mod.install_launchd(INSTALL_SCHEDULE, "python run.py", apply=False, target_dir=target_dir)
+    assert result["applied"] is False
+    assert not target_dir.exists()  # dry run creates nothing, not even the dir
+
+
+def test_install_launchd_apply_writes_file_and_calls_launchctl(tmp_path):
+    target_dir = tmp_path / "LaunchAgents"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = schedule_mod.install_launchd(INSTALL_SCHEDULE, "python run.py", apply=True, target_dir=target_dir)
+
+    assert result["applied"] is True
+    assert result["target"].exists()
+    assert "com.switchboard.test-sched" in result["target"].read_text()
+    mock_run.assert_called_once()
+    assert mock_run.call_args[0][0][:2] == ["launchctl", "load"]
+
+
+def test_uninstall_launchd_apply_removes_file(tmp_path):
+    target_dir = tmp_path / "LaunchAgents"
+    target_dir.mkdir()
+    plist_path = target_dir / "com.switchboard.test-sched.plist"
+    plist_path.write_text("<plist/>")
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = schedule_mod.uninstall_launchd("test-sched", apply=True, target_dir=target_dir)
+
+    assert result["applied"] is True
+    assert result["existed"] is True
+    assert not plist_path.exists()
+
+
+def test_uninstall_launchd_dry_run_reports_existence_without_removing(tmp_path):
+    target_dir = tmp_path / "LaunchAgents"
+    target_dir.mkdir()
+    plist_path = target_dir / "com.switchboard.test-sched.plist"
+    plist_path.write_text("<plist/>")
+
+    result = schedule_mod.uninstall_launchd("test-sched", apply=False, target_dir=target_dir)
+
+    assert result["applied"] is False
+    assert result["existed"] is True
+    assert plist_path.exists()  # dry run never removes
+
+
+def test_install_systemd_apply_writes_both_units(tmp_path):
+    target_dir = tmp_path / "systemd-user"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = schedule_mod.install_systemd(INSTALL_SCHEDULE, "python run.py", apply=True, target_dir=target_dir)
+
+    assert result["service_path"].exists()
+    assert result["timer_path"].exists()
+    assert mock_run.call_args[0][0][:3] == ["systemctl", "--user", "enable"]
 
 
 if __name__ == "__main__":
