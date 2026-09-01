@@ -8,9 +8,11 @@ from datetime import date
 from pathlib import Path
 
 from switchboard import attempts as attempts_mod
+from switchboard import debate as debate_mod
 from switchboard import dispatch as dispatch_mod
-from switchboard import memory, registry, router, talk, tickets
-from switchboard.models import Correction, RoutingRationale
+from switchboard import notify as notify_mod
+from switchboard import memory, registry, router, schedule as schedule_mod, talk, tickets
+from switchboard.models import Correction, RoutingRationale, Schedule
 
 STATUS_EMOJI = {
     "open": "⚪",
@@ -123,6 +125,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             "agent). Re-run with --ai to ask Claude, or assign manually with "
             "`switchboard reroute`."
         )
+        notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
 
     corrections = memory.load_corrections(limit=10)
@@ -140,6 +143,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     if decision.chosen_agent_id is None:
         print("AI router found no suitable agent -- leaving unrouted for a human to triage.")
         tickets.update_ticket(args.ticket_id, routing=rationale)
+        notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
 
     if decision.confidence == "low":
@@ -149,6 +153,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             "to actually commit to an agent."
         )
         tickets.update_ticket(args.ticket_id, routing=rationale)
+        notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
 
     matched_agent = next((a for a in agents if a.id == decision.chosen_agent_id), None)
@@ -218,6 +223,74 @@ def cmd_talk(args: argparse.Namespace) -> int:
     print(reply)
     path = talk.append_transcript(agent.id, args.question, reply)
     print(f"\n(appended to {path})")
+    return 0
+
+
+def cmd_schedule_new(args: argparse.Namespace) -> int:
+    agents_map = registry.agents_by_id()
+    if args.agent not in agents_map:
+        print(f"{args.agent!r} is not a registered agent id. See `switchboard agents`.")
+        return 1
+    try:
+        schedule_mod.parse_daily_cron(args.cron)
+    except ValueError as e:
+        print(f"Invalid cron: {e}")
+        return 1
+
+    sched = Schedule(id=args.id, description=args.description, agent_id=args.agent, cron=args.cron, command=args.command)
+    path = schedule_mod.new_schedule(sched)
+    print(f"Declared schedule {sched.id} at {path}. Nothing installed yet -- run `schedule render {sched.id}`.")
+    return 0
+
+
+def cmd_schedule_list(args: argparse.Namespace) -> int:
+    schedules = schedule_mod.load_schedules()
+    if not schedules:
+        print("No schedules declared. `switchboard schedule new` to add one.")
+        return 0
+    for s in schedules:
+        print(f"{s.id:<20} agent={s.agent_id:<26} cron={s.cron!r}  {s.description}")
+    return 0
+
+
+def cmd_schedule_render(args: argparse.Namespace) -> int:
+    schedules = {s.id: s for s in schedule_mod.load_schedules()}
+    sched = schedules.get(args.schedule_id)
+    if sched is None:
+        print(f"No schedule with id {args.schedule_id!r}. See `switchboard schedule list`.")
+        return 1
+    agents_map = registry.agents_by_id()
+    agent = agents_map.get(sched.agent_id)
+    if agent is None:
+        print(f"Schedule {sched.id!r} references unregistered agent {sched.agent_id!r}.")
+        return 1
+
+    rendered = schedule_mod.render_for_current_platform(sched, agent.invoke)
+    print(rendered)
+    print(
+        "\nNothing was installed. Copy this into the appropriate location "
+        "yourself (~/Library/LaunchAgents/<label>.plist + `launchctl load -w` "
+        "on macOS, or /etc/systemd/system/ + `systemctl enable --now` on "
+        "Linux) -- Switchboard renders scheduler config, it doesn't install it."
+    )
+    return 0
+
+
+def cmd_debate(args: argparse.Namespace) -> int:
+    ticket = tickets.load_ticket(args.ticket_id)
+    agents_map = registry.agents_by_id()
+    agent_a = agents_map.get(args.agent_a)
+    agent_b = agents_map.get(args.agent_b)
+    if agent_a is None or agent_b is None:
+        missing = args.agent_a if agent_a is None else args.agent_b
+        print(f"{missing!r} is not a registered agent id. See `switchboard agents`.")
+        return 1
+
+    transcript = debate_mod.run_debate(ticket, agent_a, agent_b, rounds=args.rounds)
+    for turn in transcript:
+        print(f"\n[round {turn.round}] {turn.agent_id}:\n{turn.text}")
+    path = debate_mod.append_transcript(ticket.id, transcript)
+    print(f"\n(transcript appended to {path})")
     return 0
 
 
@@ -302,6 +375,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_attempts = sub.add_parser("attempts", help="List dispatch attempts (optionally for one ticket)")
     p_attempts.add_argument("ticket_id", nargs="?", default=None)
     p_attempts.set_defaults(func=cmd_attempts)
+
+    p_sched_new = sub.add_parser("schedule-new", help="Declare a recurring schedule (not installed)")
+    p_sched_new.add_argument("--id", required=True)
+    p_sched_new.add_argument("--description", required=True)
+    p_sched_new.add_argument("--agent", required=True)
+    p_sched_new.add_argument("--cron", required=True, help="'MINUTE HOUR[,HOUR...] * * *' -- fixed time(s), daily")
+    p_sched_new.add_argument("--command", default=None, help="Override the agent's invoke command")
+    p_sched_new.set_defaults(func=cmd_schedule_new)
+
+    sub.add_parser("schedule-list", help="List declared schedules").set_defaults(func=cmd_schedule_list)
+
+    p_sched_render = sub.add_parser("schedule-render", help="Render a schedule as a launchd/systemd unit -- prints only, installs nothing")
+    p_sched_render.add_argument("schedule_id")
+    p_sched_render.set_defaults(func=cmd_schedule_render)
+
+    p_debate = sub.add_parser("debate", help="Walkie-Talkie-style structured debate between two agent personas about a ticket")
+    p_debate.add_argument("ticket_id")
+    p_debate.add_argument("--agent-a", dest="agent_a", required=True)
+    p_debate.add_argument("--agent-b", dest="agent_b", required=True)
+    p_debate.add_argument("--rounds", type=int, default=2)
+    p_debate.set_defaults(func=cmd_debate)
 
     p_close = sub.add_parser("close", help="Close a ticket and record it in the ledger")
     p_close.add_argument("ticket_id")

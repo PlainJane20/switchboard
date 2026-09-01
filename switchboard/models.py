@@ -96,6 +96,41 @@ class DispatchAttempt(BaseModel):
     returncode: Optional[int] = None
 
 
+class Schedule(BaseModel):
+    """A declared recurring dispatch -- portable markdown, same as
+    tickets and agents, until it's explicitly rendered into a real
+    platform scheduler unit. Switchboard never installs or loads a
+    schedule itself; see schedule.py for why.
+
+    `cron` supports one deliberately narrow pattern: 'M H1,H2,H3 * * *'
+    -- a fixed minute, one or more fixed hours, every day. That's the
+    actual shape of every real recurring job in this portfolio
+    (slack-daily-brief's own plist runs at 8am/1pm/6pm daily). A general
+    cron parser is a much bigger, mostly-unused surface for a tool this
+    scoped -- see ARCHITECTURE.md."""
+
+    id: str
+    description: str
+    agent_id: str
+    cron: str
+    command: Optional[str] = Field(
+        default=None,
+        description="Overrides the agent's invoke command for scheduled "
+        "runs, which aren't tied to one ticket_path. Defaults to the "
+        "agent's invoke with no substitution if the template has no "
+        "other placeholders.",
+    )
+
+
+class DebateTurn(BaseModel):
+    """One turn in a Walkie-Talkie-style debate between two agent
+    personas about how a ticket should be handled."""
+
+    agent_id: str
+    round: int
+    text: str
+
+
 class Ticket(BaseModel):
     id: str
     title: str

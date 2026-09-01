@@ -47,13 +47,18 @@ specifically at the one job it does:
 | **Learns from correction** | No feedback loop on assignment quality | **Yes** — every `reroute` is recorded and fed back into the AI router's prompt as ground truth |
 | **Runtime breadth** | 5 adapters (Claude Code, Codex, Cursor, LM Studio, Ollama) | Shells out to any command string — less abstraction, but zero adapter code to maintain |
 | **Execution tracking** | Durable attempt records (PID, status, hooks) | Durable attempt records (PID, status, exit code) — same idea, independently built |
-| **Talk mode** (advisory Q&a, no ticket/dispatch) | Yes | **Yes** — `switchboard talk <agent-id> "question"`, append-only transcript per agent |
-| **Scheduling, Walkie-Talkie, Telegram** | Yes | Not yet — see [What's next](#whats-next) |
+| **Talk mode** (advisory Q&A, no ticket/dispatch) | Yes | **Yes** — `switchboard talk <agent-id> "question"`, append-only transcript per agent |
+| **Walkie-Talkie** (AI-to-AI debate) | Two real hired agents, each in their own runtime | **Yes, adapted** — two agent *personas* (Claude, speaking from each one's registry description) debate a ticket; honest about the difference, see ARCHITECTURE.md |
+| **Scheduling** | `launchd`/`systemd` jobs, installed by the CLI | **Declared + rendered**, never auto-installed — `schedule-render` prints the exact plist/systemd unit; you copy it into place |
+| **Notifications** | Telegram-specific | **Generic** — local desktop notification (macOS) plus any webhook URL (Slack, Discord, Telegram, plain HTTP) |
 | **Routing rationale on the ticket itself** | Not applicable (no auto-routing) | Every routed ticket carries *why* — method, matched tags or AI justification, confidence — as permanent, git-diffable history |
 
-The honest summary: Livery is the better platform if you need scheduling,
-multi-runtime support, or conversational agent modes. Switchboard is the
-better *router* — because routing, specifically, is the whole product.
+The honest summary: Livery still wins on runtime breadth (5 real adapters
+vs. Switchboard shelling out to a command string) and on actually
+installing what it schedules. Everything else in this table, Switchboard
+either matches or is ahead on — automatic instead of manual routing,
+self-correcting instead of static, and a router that's the actual point
+of the product rather than one feature among many.
 
 ## How it works
 
@@ -65,6 +70,9 @@ better *router* — because routing, specifically, is the whole product.
 6. **Dispatch** composes the exact shell command that would send the ticket to its assigned agent, and prints it by default — `--run` executes it for real, with a durable attempt record (PID, status, exit code) and a visible warning for medium/high-risk agents
 7. **Close** a ticket and it's appended to `ledger.md` — an append-only audit trail, never rewritten
 8. **Talk** to any registered agent directly — "would you actually handle this?" — without filing a ticket or running anything; the exchange is appended to a per-agent transcript
+9. **Debate** a ticket between two agent personas — a Walkie-Talkie-style structured back-and-forth when it's genuinely unclear whether it's one agent's job or a mix
+10. **Schedule** a recurring dispatch declaratively, then render it into a real `launchd` plist or `systemd` unit on demand — Switchboard never touches your actual OS scheduler itself
+11. Get **notified** (local desktop notification, or any webhook you configure) the moment a ticket needs a human or a dispatch fails
 
 ## Architecture
 
@@ -137,14 +145,21 @@ in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What's next
 
-The features Livery has that Switchboard deliberately doesn't yet:
+What's left that Livery still does better, on purpose:
 
-- **Scheduling** — a `schedules/` directory of declared cadences, the
-  same portable-markdown approach used for tickets and agents.
-- **Notifications** — a lightweight local notification (or webhook) when
-  a ticket lands in "needs triage" or a dispatch attempt fails.
-- **Walkie-Talkie** — structured AI-to-AI debate between two registered
-  agents on a ticket, rather than one agent's opinion via Talk.
+- **Real runtime adapters.** Livery's agents run inside actual Claude
+  Code/Codex/Cursor/Ollama sessions; Switchboard's agents are external
+  repos invoked as a command string. This is the honest tradeoff for
+  supporting a fleet of already-existing, independently-built repos
+  instead of requiring them to speak a common adapter interface.
+- **Automatic schedule installation.** `schedule-render` deliberately
+  stops at printing the plist/systemd unit — see ARCHITECTURE.md for why
+  writing into `~/Library/LaunchAgents` automatically felt like the wrong
+  default for a tool whose actual job is routing tickets, not managing
+  your OS scheduler.
+- **Cron beyond "fixed time(s), daily."** Day-of-week and step
+  expressions aren't implemented; `parse_daily_cron` raises a clear error
+  rather than silently misinterpreting them.
 
 ## Setup
 
@@ -191,12 +206,28 @@ switchboard show 0001
 # Advisory question to an agent -- no ticket filed, nothing dispatched
 switchboard talk inbox-marshal "Would you touch an email that's already labeled by Gmail's own filters?"
 
+# Genuinely unclear whether it's one agent's job? Have two argue about it.
+switchboard debate 0005 --agent-a exec-status-rollup --agent-b critical-path-radar --rounds 2
+
+# Declare a recurring schedule -- nothing installed yet
+switchboard schedule-new --id daily-exec-rollup \
+  --description "Morning executive portfolio rollup" \
+  --agent exec-status-rollup --cron "0 8 * * *"
+
+# Render it as a real launchd plist (macOS) or systemd unit (Linux) -- prints only
+switchboard schedule-render daily-exec-rollup
+
 # Close it out -- appended to ledger.md, never rewritten
 switchboard close 0001 --summary "Inbox clean, demo-ready."
 
 # Full board, grouped by status
 switchboard board
 ```
+
+Set `SWITCHBOARD_WEBHOOK_URL` to any endpoint that accepts a JSON `{"text": "..."}`
+POST (a Slack incoming webhook, Discord, or your own) to get notified when
+a ticket needs triage or a dispatch fails. On macOS you also get a local
+desktop notification automatically, no configuration needed.
 
 The repository ships with a real, already-populated board — five tickets
 spanning open, routed, in-progress, and done, including one that was
@@ -217,12 +248,17 @@ switchboard/
 │   ├── memory.py                Append-only routing-correction log the AI router reads back
 │   ├── attempts.py               Durable dispatch attempt records (PID, status, exit code)
 │   ├── talk.py                   Advisory Q&A with an agent -- no ticket, no dispatch
+│   ├── debate.py                 Walkie-Talkie-style two-agent-persona debate
+│   ├── schedule.py               Declare + render recurring dispatches (launchd/systemd) -- never installs
+│   ├── notify.py                 Best-effort desktop + webhook notifications, never raises
 │   ├── dispatch.py               Composes and (optionally) runs the invoke command
 │   └── cli.py                    `switchboard <command>`
 ├── agents/                       Seven real specialist agents, one file each
 ├── tickets/                      A live, populated example board
 ├── memory/routing_corrections.jsonl   Git-tracked correction history
 ├── talk/                         Per-agent advisory transcripts (created on first use)
+├── walkie-talkie/                Debate transcripts (created on first use)
+├── schedules/                    Declared recurring dispatches, one file each
 ├── ledger.md                     Append-only record of closed tickets
 ├── tests/                        Fully offline (SWITCHBOARD_MOCK=1 for the AI router)
 └── ARCHITECTURE.md               Design rationale, decision by decision

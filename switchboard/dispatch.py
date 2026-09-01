@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from switchboard import attempts as attempts_mod
+from switchboard import notify as notify_mod
 from switchboard.models import AgentEntry, DispatchAttempt, Ticket
 
 
@@ -53,4 +54,9 @@ def dispatch(
     status = "succeeded" if returncode == 0 else "failed"
     attempt = attempts_mod.update_attempt(attempt.id, status=status, returncode=returncode)
     print(f"Attempt {attempt.id}: {status} (exit code {returncode}).")
+    if status == "failed":
+        notify_mod.notify(
+            f"Dispatch of ticket {ticket.id} to {agent.id} failed (exit {returncode}).",
+            title="Switchboard: dispatch failed",
+        )
     return attempt
