@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
+  <title id="title">switchboard</title>
+  <desc id="description">File a ticket. Get connected to the right agent -- or told honestly that none fit.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14102b"/>
+      <stop offset="0.55" stop-color="#241a4d"/>
+      <stop offset="1" stop-color="#3d2c7a"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#8b7bf5" stop-opacity=".30"/>
+      <stop offset="1" stop-color="#8b7bf5" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#05030f" flood-opacity=".4"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="320" rx="24" fill="url(#bg)"/>
+  <circle cx="1040" cy="55" r="220" fill="url(#glow)"/>
+  <g opacity=".12" fill="none" stroke="#b7abf7">
+    <path d="M750 40C880 140 940 40 1140 155"/>
+    <path d="M710 260C850 145 1010 280 1180 105"/>
+    <path d="M840 25C920 180 1070 135 1170 255"/>
+  </g>
+
+  <!-- routing mark: three inputs converging to one -->
+  <g transform="translate(74 68)" filter="url(#shadow)">
+    <rect width="88" height="88" rx="22" fill="#241a4d" stroke="#a89af2" stroke-opacity=".5"/>
+    <circle cx="24" cy="24" r="6" fill="#b7abf7"/>
+    <circle cx="24" cy="44" r="6" fill="#b7abf7"/>
+    <circle cx="24" cy="64" r="6" fill="#b7abf7"/>
+    <path d="M28 24H50M28 44H50M28 64H50" stroke="#8b7bf5" stroke-width="2.5" fill="none"/>
+    <path d="M50 24C60 24 60 44 62 44M50 64C60 64 60 44 62 44" stroke="#8b7bf5" stroke-width="2.5" fill="none"/>
+    <circle cx="66" cy="44" r="8" fill="#ffffff"/>
+  </g>
+
+  <text x="190" y="112" fill="#ffffff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="54" font-weight="750" letter-spacing="-1">switchboard</text>
+  <text x="192" y="153" fill="#b7abf7" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" font-weight="700" letter-spacing="2.8">GIT-NATIVE TICKET ROUTER</text>
+
+  <text x="75" y="225" fill="#e2ddf9" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22">File a ticket. Get connected to the right agent --</text>
+  <text x="75" y="258" fill="#e2ddf9" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22">or told honestly that none fit.</text>
+
+  <g transform="translate(716 168)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="12" font-weight="700">
+    <g transform="translate(0 0)"><rect width="94" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="47" y="26" text-anchor="middle" fill="#e2ddf9">7 agents</text></g>
+    <g transform="translate(104 0)"><rect width="132" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="66" y="26" text-anchor="middle" fill="#e2ddf9">self-improving</text></g>
+    <g transform="translate(246 0)"><rect width="118" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="59" y="26" text-anchor="middle" fill="#e2ddf9">human gated</text></g>
+  </g>
+</svg>
