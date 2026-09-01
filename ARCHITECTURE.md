@@ -180,14 +180,76 @@ Switchboard's version of that boundary is simpler (no runtime spawn at
 all for Talk, just a system prompt built from the registry entry) but
 enforces the same guarantee: asking a question is never itself an action.
 
+## Why `schedule-render` prints a plist/unit instead of installing it
+
+Livery installs schedules as real `launchd`/`systemd` jobs. Switchboard
+stops one step short on purpose: writing into `~/Library/LaunchAgents` or
+a systemd unit directory is a change to the *machine's* state, not the
+repo's -- it persists across reboots, survives `git clean`, and (unlike
+every other side effect in this tool) isn't something `git log` will ever
+show you happened. Every other "real" action in Switchboard -- dispatching
+an agent, sending a notification -- is scoped to either this repo's own
+files or a single outbound request; installing a scheduler job is a
+different category, closer to "modifies your OS" than "does the thing
+this tool is for." `parse_daily_cron` and the two renderers
+(`render_launchd`, `render_systemd`) do the actually-hard part (getting
+the plist/unit syntax right) and stop there. This is a real capability
+gap versus Livery, named honestly rather than quietly worked around.
+
+## Why cron support is deliberately narrow
+
+`parse_daily_cron` accepts exactly one shape: a fixed minute, one or more
+fixed hours, every day (`M H1,H2,H3 * * *`). That's not a partial
+implementation of cron -- it's the complete implementation of the one
+pattern that's actually true of every real recurring job already in this
+portfolio (`slack-daily-brief`'s own `launchd` plist runs at 8am/1pm/6pm
+daily, and nothing in this fleet needs day-of-week or step expressions).
+A general cron parser is a much bigger surface -- day-of-month, step
+values, ranges, `@reboot`-style specials -- almost all of which would go
+unused here. Raising a clear `ValueError` naming exactly what's
+unsupported beats silently mis-scheduling a job on an expression that
+looks like it should work but doesn't.
+
+## Why notifications are a generic webhook, not Telegram specifically
+
+Livery integrates with Telegram by name. Switchboard's `notify()` sends to
+a local desktop notification (macOS, best-effort, silent no-op elsewhere)
+and, if `SWITCHBOARD_WEBHOOK_URL` is set, POSTs `{"text": "..."}` to it --
+which is simultaneously a valid Slack incoming webhook payload, close
+enough to Discord's, and trivially close to whatever a Telegram bot
+bridge would want. Naming one provider means everyone using a different
+one writes their own integration; a generic webhook means the one
+integration this tool ships works for all of them, including Telegram, at
+the cost of not being a first-class Telegram experience specifically.
+`notify()` never raises on failure by design -- a bad webhook URL should
+never be the reason a `route` or `dispatch` command exits non-zero.
+
+## Why debate uses agent personas instead of real conversational agents
+
+Livery's Walkie-Talkie puts two *actually hired* agents in their own
+runtimes into a real back-and-forth. Switchboard's registered agents are
+one-shot CLIs against separate repos -- there's no live session to have
+`critical-path-radar` actually argue with `incident-postmortem-agent`,
+because neither one is a conversational process at all. `debate.py`'s
+honest adaptation: both sides of the debate are Claude, each one
+constrained by a system prompt built from that agent's actual registered
+description and tags, arguing from what's genuinely declared about it --
+not a simulation dressed up as more than it is. The transcript is labeled
+by `agent_id`, not by some third invented persona name, specifically so
+it's never mistaken for the real agent having been invoked. This is also
+why `debate` never touches `invoke` or writes a `DispatchAttempt` --
+nothing about a debate is a dispatch.
+
 ## The honest comparison to Livery, restated
 
-Livery is not a strawman here -- it has real capabilities Switchboard
-doesn't: multi-runtime adapters (Claude Code, Codex, Cursor, LM Studio,
-Ollama), scheduling via `launchd`/`systemd`, "Walkie-Talkie" for AI-to-AI
-debate, and Telegram notifications. None of that is reimplemented here,
-and pretending otherwise would be dishonest. What Switchboard does instead
-is go deep on the job Livery leaves manual -- routing -- and be strictly
-better at that one thing: automatic instead of manual, self-correcting
-instead of static, and auditable (`routing` on every ticket, a durable
-attempt record per dispatch) in ways a plain `assignee` field never was.
+Livery is not a strawman here -- it has one real, structural advantage
+Switchboard doesn't: multi-runtime adapters (Claude Code, Codex, Cursor,
+LM Studio, Ollama) mean its agents are live conversational processes,
+not one-shot command strings. That difference is *why* Livery can install
+schedules and run real AI-to-AI debate, and why Switchboard's versions of
+both stop one step short (render-only scheduling, persona-based debate)
+rather than pretend to be the same thing. Everything else here is either
+matched -- Talk mode, durable dispatch attempts, notifications -- or
+ahead: automatic instead of manual routing, self-correcting instead of
+static (`memory/routing_corrections.jsonl`), and auditable (`routing` on
+every ticket) in ways a plain `assignee` field never was.

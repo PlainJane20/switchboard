@@ -19,8 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["SWITCHBOARD_MOCK"] = "1"
 
 from switchboard import attempts as attempts_mod  # noqa: E402
-from switchboard import memory, registry, router, talk, tickets  # noqa: E402
-from switchboard.models import Correction, RouteDecision  # noqa: E402
+from switchboard import debate as debate_mod  # noqa: E402
+from switchboard import memory, registry, router  # noqa: E402
+from switchboard import schedule as schedule_mod  # noqa: E402
+from switchboard import talk, tickets  # noqa: E402
+from switchboard.models import Correction, RouteDecision, Schedule  # noqa: E402
 
 AGENT_FIXTURE = """---
 id: test-agent
@@ -232,6 +235,116 @@ def test_talk_transcript_is_append_only(tmp_path):
     assert "Q1?" in content and "A1." in content
     assert "Q2?" in content and "A2." in content
     assert content.index("Q1?") < content.index("Q2?")
+
+
+# --- schedule.py -----------------------------------------------------------
+
+def test_parse_daily_cron_valid():
+    minute, hours = schedule_mod.parse_daily_cron("30 8,13,18 * * *")
+    assert minute == 30
+    assert hours == [8, 13, 18]
+
+
+def test_parse_daily_cron_rejects_unsupported_shapes():
+    with pytest.raises(ValueError, match="unsupported cron"):
+        schedule_mod.parse_daily_cron("*/15 * * * *")
+    with pytest.raises(ValueError, match="unsupported cron"):
+        schedule_mod.parse_daily_cron("0 9 * * MON")
+
+
+def test_parse_daily_cron_rejects_out_of_range():
+    with pytest.raises(ValueError, match="out of range"):
+        schedule_mod.parse_daily_cron("0 25 * * *")
+
+
+def test_schedule_round_trips_through_disk(tmp_path):
+    schedules_dir = tmp_path / "schedules"
+    sched = Schedule(
+        id="daily-rollup", description="Morning exec rollup",
+        agent_id="exec-status-rollup", cron="0 8 * * *",
+    )
+    schedule_mod.new_schedule(sched, schedules_dir=schedules_dir)
+
+    loaded = schedule_mod.load_schedules(schedules_dir)
+    assert len(loaded) == 1
+    assert loaded[0].id == "daily-rollup"
+    assert loaded[0].cron == "0 8 * * *"
+
+
+def test_render_launchd_contains_expected_times():
+    sched = Schedule(id="brief", description="Daily brief", agent_id="a", cron="0 8,13,18 * * *")
+    plist = schedule_mod.render_launchd(sched, agent_invoke="bash run_daily_brief.sh")
+    assert plist.count("<key>Hour</key><integer>8</integer>") == 1
+    assert plist.count("<key>Hour</key><integer>13</integer>") == 1
+    assert plist.count("<key>Hour</key><integer>18</integer>") == 1
+    assert "run_daily_brief.sh" in plist
+
+
+def test_render_systemd_contains_oncalendar_lines():
+    sched = Schedule(id="brief", description="Daily brief", agent_id="a", cron="0 8,18 * * *")
+    service, timer = schedule_mod.render_systemd(sched, agent_invoke="bash run_daily_brief.sh")
+    assert "OnCalendar=*-*-* 08:00:00" in timer
+    assert "OnCalendar=*-*-* 18:00:00" in timer
+    assert "run_daily_brief.sh" in service
+
+
+def test_render_strips_ticket_path_placeholder_for_scheduled_runs():
+    sched = Schedule(id="s", description="d", agent_id="a", cron="0 8 * * *")
+    service, _ = schedule_mod.render_systemd(sched, agent_invoke="python run_demo.py {ticket_path}")
+    assert "{ticket_path}" not in service
+
+
+# --- notify.py ---------------------------------------------------------------
+
+def test_notify_never_raises_with_no_webhook_configured(monkeypatch):
+    monkeypatch.delenv("SWITCHBOARD_WEBHOOK_URL", raising=False)
+    from switchboard import notify
+
+    notify.notify("test message")  # must not raise, on any platform
+
+
+def test_notify_webhook_failure_is_swallowed(monkeypatch):
+    monkeypatch.setenv("SWITCHBOARD_WEBHOOK_URL", "http://127.0.0.1:1/definitely-not-listening")
+    from switchboard import notify
+
+    notify.notify("test message")  # connection refused internally -- must not raise
+
+
+# --- debate.py ---------------------------------------------------------------
+
+def test_debate_alternates_agents_across_rounds(workspace):
+    agents_dir, tickets_dir = workspace
+    (agents_dir / "test-agent-b.md").write_text(
+        AGENT_FIXTURE.replace("test-agent", "test-agent-b")
+    )
+    agents = {a.id: a for a in registry.load_agents(agents_dir)}
+    ticket = tickets.new_ticket(title="Who handles this?", tickets_dir=tickets_dir)
+
+    transcript = debate_mod.run_debate(
+        ticket, agents["test-agent"], agents["test-agent-b"], rounds=2,
+        mock_fixtures=["A-r1", "B-r1", "A-r2", "B-r2"],
+    )
+
+    assert [t.agent_id for t in transcript] == [
+        "test-agent", "test-agent-b", "test-agent", "test-agent-b",
+    ]
+    assert [t.round for t in transcript] == [1, 1, 2, 2]
+    assert [t.text for t in transcript] == ["A-r1", "B-r1", "A-r2", "B-r2"]
+
+
+def test_debate_transcript_is_written(tmp_path):
+    from switchboard.models import DebateTurn
+
+    walkie_dir = tmp_path / "walkie-talkie"
+    transcript = [
+        DebateTurn(agent_id="a", round=1, text="I'll take it."),
+        DebateTurn(agent_id="b", round=1, text="Disagree, here's why."),
+    ]
+    path = debate_mod.append_transcript("0001", transcript, walkie_dir=walkie_dir)
+
+    content = path.read_text()
+    assert "I'll take it." in content
+    assert "Disagree, here's why." in content
 
 
 if __name__ == "__main__":
