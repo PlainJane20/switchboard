@@ -21,9 +21,9 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 
 <div align="center">
 
-| 7 registered agents | 2 routing tiers | 6 gaps closed vs. Livery | 26 tests |
+| 8 registered agents | 2 runtimes | 8 gaps closed vs. Livery | 41 tests |
 |:---:|:---:|:---:|:---:|
-| One markdown file each | Deterministic tag-match → Claude fallback | Attempts · concurrency · Talk · Debate · Schedule · Notify | Fully offline, zero API key |
+| One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Fully offline, zero API key |
 
 </div>
 
@@ -67,12 +67,14 @@ specifically at the one job it does:
 | **Scheduling** | `launchd`/`systemd` jobs, installed by the CLI | **Declared + rendered**, never auto-installed |
 | **Notifications** | Telegram-specific | **Generic** — desktop notification plus any webhook (Slack, Discord, Telegram, plain HTTP) |
 | **Routing rationale on the ticket** | Not applicable (no auto-routing) | Every routed ticket carries *why*, as permanent git-diffable history |
-| **Runtime breadth** | 5 real adapters (Claude Code, Codex, Cursor, LM Studio, Ollama) | Shells out to a command string — the one place Livery still wins structurally |
+| **Live agent runtime** | 5 real adapters (Claude Code, Codex, Cursor, LM Studio, Ollama) | **One real adapter** (`claude -p`, verified against the installed CLI, not guessed) — narrower, but genuinely live, with real tool access |
+| **Schedule installation** | Installs `launchd`/`systemd` jobs directly | **Yes, gated** — `schedule-install --apply` writes the real file and activates it; the bare command is a dry run |
 
-The honest summary: Livery still wins on runtime breadth — its agents are
-live conversational processes, Switchboard's are one-shot command
-strings — and on actually installing what it schedules. Everything else
-in this table, Switchboard either matches or is ahead on.
+The honest summary: Livery still has more runtime breadth (5 adapters vs.
+1) and a smaller safety gate on installing what it schedules. Everything
+else in this table, Switchboard either matches or is ahead on — including
+now having *a* real live agent runtime, not just command strings, and
+real (if explicitly gated) schedule installation.
 
 ---
 
@@ -83,11 +85,11 @@ in this table, Switchboard either matches or is ahead on.
 3. If no agent shares a single tag, the ticket stays **unrouted** unless you explicitly ask the **AI router** (Claude) — enriched with recent human corrections as few-shot context, and still allowed to say none of them fit
 4. A **low-confidence** AI decision is recorded as a *suggestion*, not an assignment — the ticket stays open until a human commits to it
 5. **`reroute`** lets a human override any decision, and permanently records why — that correction improves every future ambiguous routing call
-6. **Dispatch** composes the exact shell command that would send the ticket to its assigned agent, and prints it by default — `--run` executes it for real, with a durable attempt record and a warning for medium/high-risk agents
+6. **Dispatch** composes the exact shell command (or, for a `claude_code` agent, a live session prompt) that would send the ticket to its assigned agent, and prints it by default — `--run` executes it for real, with a durable attempt record and a warning for medium/high-risk agents
 7. **Close** a ticket and it's appended to `ledger.md` — an append-only audit trail, never rewritten
 8. **Talk** to any registered agent directly — no ticket filed, nothing dispatched
 9. **Debate** a ticket between two agent personas when it's genuinely unclear whose job it is
-10. **Schedule** a recurring dispatch declaratively, then render it into a real `launchd`/`systemd` unit — Switchboard never touches your OS scheduler itself
+10. **Schedule** a recurring dispatch declaratively, render it into a real `launchd`/`systemd` unit, and optionally **install** it for real — gated behind an explicit `--apply`, never a side effect of anything else
 11. Get **notified** — desktop notification or webhook — the moment a ticket needs a human or a dispatch fails
 
 ## Architecture
@@ -129,6 +131,8 @@ in [ARCHITECTURE.md](ARCHITECTURE.md).
 | A fire-and-forget `subprocess.run` is a real robustness gap | `--run` now uses `Popen` (PID captured at start) through to a `DispatchAttempt` record — proven against a real failure, not mocked (see below) |
 | Concurrent ticket creation needs an actual lock | `O_CREAT\|O_EXCL` advisory lock around id allocation; a 10-thread test proves it |
 | Not every repo fits the same abstraction | Three real repos deliberately excluded from the agent registry — forcing them in would look complete while being wrong |
+| A "verified" adapter that only works under one auth setup isn't verified | `--bare` mode (the obvious default for scripted `claude` calls) fails outright on this machine — managed/enterprise settings pin first-party OAuth login, which `--bare` explicitly disables. The adapter doesn't use it. |
+| Installing into `~/Library/LaunchAgents` is a different category of action than dispatching an agent | `schedule-install` is a dry run by default even though `schedule-render` already existed — an extra explicit gate, on top of the one every other real action already has |
 
 The dispatch-attempt claim, proven, not asserted — dispatching a ticket to
 an agent whose repo isn't cloned locally correctly recorded a failure
@@ -145,6 +149,23 @@ instead of a silent hang:
 }
 ```
 
+And the live `claude_code` runtime claim, proven the same way — ticket
+0006 dispatched for real to `research-assistant`, which read
+`ARCHITECTURE.md` with its `Read` tool and answered correctly, with a real
+session id and real cost tracked:
+
+```json
+{
+  "id": "0006-20260831T205910",
+  "ticket_id": "0006",
+  "agent_id": "research-assistant",
+  "status": "succeeded",
+  "returncode": 0,
+  "session_id": "06f277f3-da9d-451d-bcee-7b2619e09baf",
+  "cost_usd": 0.15030852000000003
+}
+```
+
 ---
 
 ## What's next
@@ -155,10 +176,11 @@ instead of a silent hang:
 - [x] Concurrency-safe ticket creation
 - [x] Talk mode
 - [x] Walkie-Talkie-style debate (persona-adapted)
-- [x] Scheduling (declared + rendered, not installed)
+- [x] Scheduling (declared, rendered, and installable)
 - [x] Generic notifications (desktop + webhook)
-- [ ] Real runtime adapters — agents are command strings, not live sessions, by design
-- [ ] Automatic schedule installation — a deliberate stop-short; see ARCHITECTURE.md
+- [x] A real, live runtime adapter (`claude_code`) — verified against the actual CLI, proven with a real dispatch
+- [x] Schedule installation — gated behind `--apply`, never automatic
+- [ ] Runtime breadth beyond Claude Code — Codex, Cursor, LM Studio, Ollama would each need their own verified adapter; one real one beats four guessed ones
 - [ ] Cron beyond "fixed time(s), daily" — anything else raises a clear error instead of guessing
 
 ## Setup
@@ -217,6 +239,18 @@ switchboard schedule-new --id daily-exec-rollup \
 # Render it as a real launchd plist (macOS) or systemd unit (Linux) -- prints only
 switchboard schedule-render daily-exec-rollup
 
+# Preview exactly what installing it would write and where -- still nothing written
+switchboard schedule-install daily-exec-rollup
+
+# Actually write it and activate it (launchctl load / systemctl enable --now)
+switchboard schedule-install daily-exec-rollup --apply
+switchboard schedule-uninstall daily-exec-rollup --apply    # and to remove it again
+
+# Dispatch to a live claude_code agent -- real tool access, not a canned script
+switchboard new --title "Summarize a doc" --tags "research" --body "..."
+switchboard route 0007
+switchboard dispatch 0007 --run
+
 # Close it out -- appended to ledger.md, never rewritten
 switchboard close 0001 --summary "Inbox clean, demo-ready."
 
@@ -229,11 +263,12 @@ Set `SWITCHBOARD_WEBHOOK_URL` to any endpoint that accepts a JSON
 get notified when a ticket needs triage or a dispatch fails. macOS also
 gets a local desktop notification automatically, no configuration needed.
 
-The repository ships with a real, already-populated board — five tickets
+The repository ships with a real, already-populated board — six tickets
 spanning open, routed, in-progress, and done, including one that was
 deliberately unrouted by the deterministic pass and then manually
-corrected with `reroute`, now in `memory/routing_corrections.jsonl` for
-the AI router to learn from on the next ambiguous ticket.
+corrected with `reroute` (now in `memory/routing_corrections.jsonl` for
+the AI router to learn from), and one (0006) that was actually dispatched
+to the live `claude_code` runtime and closed with a real result.
 
 ---
 
@@ -251,11 +286,12 @@ switchboard/
 │   ├── attempts.py               Durable dispatch attempt records (PID, status, exit code)
 │   ├── talk.py                   Advisory Q&A with an agent -- no ticket, no dispatch
 │   ├── debate.py                 Walkie-Talkie-style two-agent-persona debate
-│   ├── schedule.py               Declare + render recurring dispatches (launchd/systemd) -- never installs
+│   ├── schedule.py               Declare, render, and (gated by --apply) install recurring dispatches
 │   ├── notify.py                 Best-effort desktop + webhook notifications, never raises
-│   ├── dispatch.py               Composes and (optionally) runs the invoke command
+│   ├── claude_runtime.py         The one real live-agent adapter -- `claude -p`, verified against the installed CLI
+│   ├── dispatch.py               Composes and (optionally) runs the invoke command, or a live claude_code session
 │   └── cli.py                    `switchboard <command>`
-├── agents/                       Seven real specialist agents, one file each
+├── agents/                       Eight real specialist agents, one file each (one runs live)
 ├── tickets/                      A live, populated example board
 ├── memory/routing_corrections.jsonl   Git-tracked correction history
 ├── talk/                         Per-agent advisory transcripts (created on first use)

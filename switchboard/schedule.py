@@ -1,28 +1,34 @@
 """Declarative recurring schedules -- portable markdown, rendered into a
-real launchd plist or systemd unit on request, never installed
-automatically.
+real launchd plist or systemd unit, and (since this module's install/
+uninstall functions were added) actually installable -- but never as a
+side effect of anything except an explicit `install(..., apply=True)`
+call, which the CLI only reaches via `schedule-install --apply`.
 
 Livery's README: "Portable schedules tracked as markdown, installed
 explicitly as user-level launchd jobs on macOS or systemd timers on
-Linux." Switchboard matches the "portable markdown, explicit install"
-half of that. It deliberately does *not* implement the "installed" half
-as an automatic action -- writing into ~/Library/LaunchAgents or a
-systemd user directory is a real, somewhat hard-to-notice change to the
-machine's actual scheduler state, categorically different from dispatching
-a registered agent (this tool's actual job). `schedule render` prints
-exactly what would need to go where; a human copies it into place. See
-ARCHITECTURE.md for the full reasoning.
+Linux." `render_*` gives you the "portable markdown" half with zero risk
+-- pure string generation, no filesystem writes outside the repo. `install`
+gives you the "explicit install" half, gated behind `apply=True` so the
+default call is a dry run that reports exactly what it *would* write and
+where, matching every other real-side-effect action in this tool
+(`dispatch --run`, the risk-tier warning). See ARCHITECTURE.md for why
+writing into ~/Library/LaunchAgents is treated as a bigger deal than
+dispatching an agent, and gets an extra explicit gate because of it.
 """
 
 from __future__ import annotations
 
 import platform
 import re
+import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from switchboard import frontmatter
 from switchboard.models import Schedule
+
+DEFAULT_LAUNCHD_DIR = Path.home() / "Library" / "LaunchAgents"
+DEFAULT_SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 
 DEFAULT_SCHEDULES_DIR = Path("schedules")
 
@@ -139,5 +145,115 @@ def render_for_current_platform(schedule: Schedule, agent_invoke: str) -> str:
         return f"# {schedule.id}.service\n{service}\n# {schedule.id}.timer\n{timer}"
     raise NotImplementedError(
         f"no scheduler rendering implemented for platform {system!r} "
+        f"-- launchd (macOS) and systemd (Linux) are supported."
+    )
+
+
+class InstallResult(dict):
+    """Plain dict subclass so callers can do result['paths'] or
+    result.paths-style access without a dedicated model for what's really
+    just a summary of files touched -- not state Switchboard reads back."""
+
+
+def install_launchd(
+    schedule: Schedule,
+    agent_invoke: str,
+    apply: bool = False,
+    target_dir: Path = DEFAULT_LAUNCHD_DIR,
+    label_prefix: str = "com.switchboard",
+) -> InstallResult:
+    plist = render_launchd(schedule, agent_invoke, label_prefix=label_prefix)
+    target = target_dir / f"{label_prefix}.{schedule.id}.plist"
+
+    if not apply:
+        return InstallResult(applied=False, target=target, content=plist, launchctl_ran=False)
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(plist)
+    proc = subprocess.run(["launchctl", "load", "-w", str(target)], capture_output=True, text=True)
+    return InstallResult(
+        applied=True, target=target, content=plist,
+        launchctl_ran=True, launchctl_returncode=proc.returncode, launchctl_stderr=proc.stderr,
+    )
+
+
+def uninstall_launchd(
+    schedule_id: str,
+    apply: bool = False,
+    target_dir: Path = DEFAULT_LAUNCHD_DIR,
+    label_prefix: str = "com.switchboard",
+) -> InstallResult:
+    target = target_dir / f"{label_prefix}.{schedule_id}.plist"
+    if not apply:
+        return InstallResult(applied=False, target=target, existed=target.exists())
+
+    existed = target.exists()
+    if existed:
+        subprocess.run(["launchctl", "unload", "-w", str(target)], capture_output=True, text=True)
+        target.unlink()
+    return InstallResult(applied=True, target=target, existed=existed)
+
+
+def install_systemd(
+    schedule: Schedule,
+    agent_invoke: str,
+    apply: bool = False,
+    target_dir: Path = DEFAULT_SYSTEMD_USER_DIR,
+) -> InstallResult:
+    service, timer = render_systemd(schedule, agent_invoke)
+    service_path = target_dir / f"switchboard-{schedule.id}.service"
+    timer_path = target_dir / f"switchboard-{schedule.id}.timer"
+
+    if not apply:
+        return InstallResult(
+            applied=False, service_path=service_path, timer_path=timer_path,
+            service_content=service, timer_content=timer, systemctl_ran=False,
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    service_path.write_text(service)
+    timer_path.write_text(timer)
+    proc = subprocess.run(
+        ["systemctl", "--user", "enable", "--now", timer_path.name],
+        capture_output=True, text=True,
+    )
+    return InstallResult(
+        applied=True, service_path=service_path, timer_path=timer_path,
+        systemctl_ran=True, systemctl_returncode=proc.returncode, systemctl_stderr=proc.stderr,
+    )
+
+
+def uninstall_systemd(
+    schedule_id: str, apply: bool = False, target_dir: Path = DEFAULT_SYSTEMD_USER_DIR
+) -> InstallResult:
+    service_path = target_dir / f"switchboard-{schedule_id}.service"
+    timer_path = target_dir / f"switchboard-{schedule_id}.timer"
+    if not apply:
+        return InstallResult(
+            applied=False, service_path=service_path, timer_path=timer_path,
+            existed=service_path.exists() or timer_path.exists(),
+        )
+
+    existed = service_path.exists() or timer_path.exists()
+    if existed:
+        subprocess.run(
+            ["systemctl", "--user", "disable", "--now", timer_path.name],
+            capture_output=True, text=True,
+        )
+        service_path.unlink(missing_ok=True)
+        timer_path.unlink(missing_ok=True)
+    return InstallResult(applied=True, existed=existed)
+
+
+def install_for_current_platform(
+    schedule: Schedule, agent_invoke: str, apply: bool = False, target_dir: Optional[Path] = None
+) -> InstallResult:
+    system = platform.system()
+    if system == "Darwin":
+        return install_launchd(schedule, agent_invoke, apply=apply, **({"target_dir": target_dir} if target_dir else {}))
+    if system == "Linux":
+        return install_systemd(schedule, agent_invoke, apply=apply, **({"target_dir": target_dir} if target_dir else {}))
+    raise NotImplementedError(
+        f"no scheduler install implemented for platform {system!r} "
         f"-- launchd (macOS) and systemd (Linux) are supported."
     )

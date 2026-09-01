@@ -240,16 +240,85 @@ it's never mistaken for the real agent having been invoked. This is also
 why `debate` never touches `invoke` or writes a `DispatchAttempt` --
 nothing about a debate is a dispatch.
 
+## Why only one live runtime adapter, verified, instead of five unverified ones
+
+Livery documents five: Claude Code, Codex, Cursor, LM Studio, Ollama.
+Adding five adapters to Switchboard by reading each CLI's docs and hoping
+would have produced a README claim ("5 runtimes!") backed by nothing --
+none of it exercised, none of it checked against the real tools. Instead:
+one adapter (`claude_runtime.py`), and every claim about it is checked
+against something real before being written down --
+
+1. The exact flags (`-p`, `--output-format json`, `--permission-mode`,
+   `--allowedTools`, `--append-system-prompt`) were checked against
+   `claude --help` on the actual installed CLI, not a remembered or
+   assumed syntax.
+2. The JSON response shape (`result`, `session_id`, `total_cost_usd`,
+   `is_error`) came from one real `claude -p` invocation, run before
+   `_parse_result_json` was written -- the parser was built to match real
+   output, not the reverse.
+3. The adapter was proven against a real dispatch, not just a mocked
+   test: ticket 0006, routed to `research-assistant`, actually read
+   `ARCHITECTURE.md` with its `Read` tool and answered correctly, with a
+   real `session_id` and real `cost_usd` recorded in the resulting
+   `DispatchAttempt` (see README's Real Findings section for the exact
+   JSON).
+
+A general "here's how you'd plug in Codex or Cursor" extension point
+exists (`AgentEntry.runtime` is a `Literal`, trivially widened), but
+nothing is registered against it that hasn't been checked the same way.
+
+## Why the adapter doesn't use `--bare` or `--dangerously-skip-permissions`
+
+Both were real candidates and both were rejected for reasons discovered,
+not assumed:
+
+- **`--bare`** looked like the obvious default for a scripted, reproducible
+  invocation -- it skips hooks, plugin sync, and CLAUDE.md
+  auto-discovery. In practice, `--bare` restricts authentication to
+  `ANTHROPIC_API_KEY`/`apiKeyHelper` only, and **fails outright** on a
+  machine where managed/enterprise settings pin first-party OAuth login,
+  which is exactly the machine this was developed and tested on. An
+  adapter that only works under one specific auth configuration isn't a
+  verified adapter for general use -- it's verified for one setup. The
+  adapter omits `--bare` entirely rather than ship something that would
+  silently fail for a meaningful fraction of real Claude Code installs.
+- **`--dangerously-skip-permissions`** fully disables Claude Code's own
+  safety checks. Nothing about dispatching a ticket to an unattended
+  agent justifies that; `--permission-mode dontAsk` plus an explicit,
+  per-agent `allowed_tools` allowlist (`research-assistant` gets `[Read,
+  Grep, Glob]` -- read-only, no edits, no bash) is the scoped equivalent,
+  and it's what every registered `claude_code` agent actually uses.
+
+## Why `schedule-install` is a dry run by default, even though `schedule-render` already existed
+
+`schedule-render` already gave a zero-risk preview -- pure string
+generation, nothing written anywhere. Adding `schedule-install` could
+have made `--apply` the only mode, on the reasoning that anyone typing
+`install` already means it. It doesn't work that way here: `install`
+defaults to the same dry-run shape as `render` (prints the exact target
+path and content, writes nothing) and requires a *second*, explicit
+`--apply` to actually touch `~/Library/LaunchAgents` or
+`~/.config/systemd/user` and call `launchctl`/`systemctl`. This is a
+deliberate extra gate beyond what `dispatch --run` gets (which only needs
+one flag) -- because a scheduled job, once installed, keeps running on its
+own after this tool and this terminal session are gone, on a cadence
+nobody is actively watching. That's a materially different risk profile
+from a single dispatch that finishes and reports back immediately, and it
+earns a correspondingly more deliberate default.
+
 ## The honest comparison to Livery, restated
 
-Livery is not a strawman here -- it has one real, structural advantage
-Switchboard doesn't: multi-runtime adapters (Claude Code, Codex, Cursor,
-LM Studio, Ollama) mean its agents are live conversational processes,
-not one-shot command strings. That difference is *why* Livery can install
-schedules and run real AI-to-AI debate, and why Switchboard's versions of
-both stop one step short (render-only scheduling, persona-based debate)
-rather than pretend to be the same thing. Everything else here is either
-matched -- Talk mode, durable dispatch attempts, notifications -- or
-ahead: automatic instead of manual routing, self-correcting instead of
-static (`memory/routing_corrections.jsonl`), and auditable (`routing` on
-every ticket) in ways a plain `assignee` field never was.
+Livery still has one real, structural advantage: multi-runtime adapters
+(Claude Code, Codex, Cursor, LM Studio, Ollama) mean *all* of its agents
+are live conversational processes. Switchboard has exactly one verified
+live runtime and seven command-string agents alongside it -- narrower, but
+the one that exists is real, checked against the actual CLI, and proven
+against a real dispatch rather than asserted. Scheduling now has a real
+install path too, gated behind `--apply` rather than automatic. What's
+left genuinely ahead of Switchboard: four more runtimes' worth of breadth,
+and a smaller safety gate on the one thing (schedule install) that
+persists after the tool stops running. Everything else -- automatic
+routing, self-correcting via `memory/routing_corrections.jsonl`, durable
+attempts, Talk, Debate, generic notifications, auditable `routing` on
+every ticket -- is either matched or ahead.

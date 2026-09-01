@@ -254,25 +254,70 @@ def cmd_schedule_list(args: argparse.Namespace) -> int:
 
 
 def cmd_schedule_render(args: argparse.Namespace) -> int:
-    schedules = {s.id: s for s in schedule_mod.load_schedules()}
-    sched = schedules.get(args.schedule_id)
+    sched, agent = _schedule_and_agent(args.schedule_id)
     if sched is None:
-        print(f"No schedule with id {args.schedule_id!r}. See `switchboard schedule list`.")
-        return 1
-    agents_map = registry.agents_by_id()
-    agent = agents_map.get(sched.agent_id)
-    if agent is None:
-        print(f"Schedule {sched.id!r} references unregistered agent {sched.agent_id!r}.")
         return 1
 
     rendered = schedule_mod.render_for_current_platform(sched, agent.invoke)
     print(rendered)
     print(
-        "\nNothing was installed. Copy this into the appropriate location "
-        "yourself (~/Library/LaunchAgents/<label>.plist + `launchctl load -w` "
-        "on macOS, or /etc/systemd/system/ + `systemctl enable --now` on "
-        "Linux) -- Switchboard renders scheduler config, it doesn't install it."
+        "\nNothing was installed. Run `schedule-install "
+        f"{sched.id}` to preview exactly what would be written and where, "
+        f"or `schedule-install {sched.id} --apply` to actually do it."
     )
+    return 0
+
+
+def _schedule_and_agent(schedule_id: str):
+    schedules = {s.id: s for s in schedule_mod.load_schedules()}
+    sched = schedules.get(schedule_id)
+    if sched is None:
+        print(f"No schedule with id {schedule_id!r}. See `switchboard schedule-list`.")
+        return None, None
+    agents_map = registry.agents_by_id()
+    agent = agents_map.get(sched.agent_id)
+    if agent is None:
+        print(f"Schedule {sched.id!r} references unregistered agent {sched.agent_id!r}.")
+        return None, None
+    return sched, agent
+
+
+def cmd_schedule_install(args: argparse.Namespace) -> int:
+    sched, agent = _schedule_and_agent(args.schedule_id)
+    if sched is None:
+        return 1
+
+    result = schedule_mod.install_for_current_platform(sched, agent.invoke, apply=args.apply)
+    if not result["applied"]:
+        print("DRY RUN -- nothing written. Pass --apply to actually install this.\n")
+        for key, value in result.items():
+            if key == "applied":
+                continue
+            print(f"{key}:\n{value}\n" if isinstance(value, str) and len(value) > 80 else f"{key}: {value}")
+        return 0
+
+    print(f"Installed. {result}")
+    if result.get("launchctl_returncode") not in (None, 0) or result.get("systemctl_returncode") not in (None, 0):
+        print("WARNING: the scheduler command reported a non-zero exit -- the file was written, but activation may have failed. Check the *_stderr field above.")
+    return 0
+
+
+def cmd_schedule_uninstall(args: argparse.Namespace) -> int:
+    import platform as platform_mod
+
+    system = platform_mod.system()
+    if system == "Darwin":
+        result = schedule_mod.uninstall_launchd(args.schedule_id, apply=args.apply)
+    elif system == "Linux":
+        result = schedule_mod.uninstall_systemd(args.schedule_id, apply=args.apply)
+    else:
+        print(f"No uninstall implemented for platform {system!r}.")
+        return 1
+
+    if not result["applied"]:
+        print(f"DRY RUN -- nothing removed. existed={result['existed']}. Pass --apply to actually remove it.")
+        return 0
+    print(f"Removed (existed={result['existed']}).")
     return 0
 
 
@@ -389,6 +434,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched_render = sub.add_parser("schedule-render", help="Render a schedule as a launchd/systemd unit -- prints only, installs nothing")
     p_sched_render.add_argument("schedule_id")
     p_sched_render.set_defaults(func=cmd_schedule_render)
+
+    p_sched_install = sub.add_parser("schedule-install", help="Install a schedule as a real launchd/systemd job. Dry run unless --apply.")
+    p_sched_install.add_argument("schedule_id")
+    p_sched_install.add_argument("--apply", action="store_true", help="Actually write the file and activate it, instead of only previewing")
+    p_sched_install.set_defaults(func=cmd_schedule_install)
+
+    p_sched_uninstall = sub.add_parser("schedule-uninstall", help="Remove a previously installed schedule. Dry run unless --apply.")
+    p_sched_uninstall.add_argument("schedule_id")
+    p_sched_uninstall.add_argument("--apply", action="store_true", help="Actually remove it, instead of only previewing")
+    p_sched_uninstall.set_defaults(func=cmd_schedule_uninstall)
 
     p_debate = sub.add_parser("debate", help="Walkie-Talkie-style structured debate between two agent personas about a ticket")
     p_debate.add_argument("ticket_id")

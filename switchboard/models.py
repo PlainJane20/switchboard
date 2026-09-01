@@ -18,18 +18,40 @@ RoutingMethod = Literal["deterministic", "ai", "manual"]
 AttemptStatus = Literal["running", "succeeded", "failed"]
 
 
+AgentRuntime = Literal["command", "claude_code"]
+
+
 class AgentEntry(BaseModel):
-    """One registered specialist agent -- a real repo in the portfolio,
-    described declaratively so Switchboard never needs to know what's
-    inside it."""
+    """One registered specialist agent.
+
+    Two runtimes, not five: `command` (the default -- shells out to
+    `invoke`, exactly like every agent registered before this field
+    existed) and `claude_code` (spawns a real, live `claude -p` session
+    with tool access, closer to what Livery's agents actually are). See
+    ARCHITECTURE.md for why only one live runtime is implemented, verified
+    against the real CLI, instead of five unverified ones."""
 
     id: str
     name: str
     repo: str
     invoke: str = Field(
-        description="Shell command template used to dispatch a ticket to "
-        "this agent. '{ticket_path}' is substituted with the ticket's "
-        "markdown file at dispatch time."
+        default="",
+        description="Shell command template for runtime='command'. "
+        "'{ticket_path}' is substituted with the ticket's markdown file "
+        "at dispatch time. Ignored for runtime='claude_code'.",
+    )
+    runtime: AgentRuntime = "command"
+    cwd: Optional[str] = Field(
+        default=None,
+        description="Working directory for a claude_code session -- where "
+        "its Read/Edit/Bash tools actually operate. Unset means the "
+        "directory Switchboard itself is run from.",
+    )
+    allowed_tools: List[str] = Field(
+        default_factory=list,
+        description="Tool allowlist for a claude_code session (e.g. "
+        "['Read', 'Grep']). Empty means Claude Code's own defaults for "
+        "the chosen permission_mode -- not 'no restrictions.'",
     )
     tags: List[str] = Field(default_factory=list)
     risk_tier: RiskTier = "low"
@@ -94,6 +116,11 @@ class DispatchAttempt(BaseModel):
     pid: Optional[int] = None
     status: AttemptStatus = "running"
     returncode: Optional[int] = None
+    result_text: Optional[str] = Field(
+        default=None, description="claude_code runtime only -- the session's final response."
+    )
+    session_id: Optional[str] = None
+    cost_usd: Optional[float] = None
 
 
 class Schedule(BaseModel):
