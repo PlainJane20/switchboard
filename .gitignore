@@ -5,3 +5,12 @@ venv/
 .env
 .pytest_cache/
 .DS_Store
+*.egg-info/
+build/
+dist/
+
+# Ephemeral dispatch runtime state -- PIDs and exit codes from three runs
+# ago have no lasting value. Tickets, agents, and routing corrections are
+# the durable history; this isn't.
+.switchboard/
+

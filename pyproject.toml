@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "switchboard-router"
+version = "0.1.0"
+description = "A git-native ticket router for a fleet of specialist AI agents."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0",
+    "anthropic>=0.75.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+switchboard = "switchboard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["switchboard*"]
