@@ -4,7 +4,10 @@ keep in sync with the files."""
 
 from __future__ import annotations
 
+import os
 import re
+import time
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
@@ -16,6 +19,37 @@ DEFAULT_TICKETS_DIR = Path("tickets")
 DEFAULT_LEDGER_PATH = Path("ledger.md")
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_RETRY_INTERVAL = 0.05
+
+
+@contextmanager
+def _id_allocation_lock(tickets_dir: Path):
+    """Advisory lock around ticket-id allocation so two concurrent `new`
+    invocations can't both compute the same next id and silently clobber
+    each other. O_CREAT|O_EXCL is atomic at the filesystem level -- the
+    same primitive `flock`/`fcntl.flock` build on, without an extra
+    dependency for one lock file."""
+    lock_path = tickets_dir / ".id.lock"
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"could not acquire ticket-id lock at {lock_path} "
+                    f"within {_LOCK_TIMEOUT_SECONDS}s -- a previous run may "
+                    f"have crashed while holding it; delete the lock file "
+                    f"if so."
+                )
+            time.sleep(_LOCK_RETRY_INTERVAL)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
 
 
 def _slugify(title: str) -> str:
@@ -44,17 +78,18 @@ def new_ticket(
     tickets_dir: Path = DEFAULT_TICKETS_DIR,
 ) -> Ticket:
     tickets_dir.mkdir(parents=True, exist_ok=True)
-    ticket_id = _next_id(tickets_dir)
-    ticket = Ticket(
-        id=ticket_id,
-        title=title,
-        status="open",
-        created=date.today(),
-        tags=tags or [],
-        assignee=None,
-        body=body,
-    )
-    _write(ticket, tickets_dir)
+    with _id_allocation_lock(tickets_dir):
+        ticket_id = _next_id(tickets_dir)
+        ticket = Ticket(
+            id=ticket_id,
+            title=title,
+            status="open",
+            created=date.today(),
+            tags=tags or [],
+            assignee=None,
+            body=body,
+        )
+        _write(ticket, tickets_dir)
     return ticket
 
 

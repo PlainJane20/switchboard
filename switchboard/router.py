@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from typing import List, Optional, Tuple
 
-from switchboard.models import AgentEntry, RouteDecision, Ticket
+from switchboard.models import AgentEntry, Correction, RouteDecision, Ticket
 
 MOCK_MODE = os.environ.get("SWITCHBOARD_MOCK") == "1"
 
@@ -39,15 +39,32 @@ def route_deterministic(
 
 ROUTER_SYSTEM = """You are the routing function for Switchboard, a ticket \
 dispatch system for a fleet of narrow, single-purpose AI agents. You will \
-be given a ticket and the full agent registry (id, name, tags, \
-description). Pick the single best-fit agent by id, or return null if \
-none of them are actually a fit -- forcing a bad match is worse than \
+be given a ticket, the full agent registry (id, name, tags, description), \
+and -- when available -- recent examples of humans correcting past \
+routing decisions. Pick the single best-fit agent by id, or return null \
+if none of them are actually a fit -- forcing a bad match is worse than \
 leaving a ticket unrouted for a human to triage. Be honest about \
-confidence: 'low' if you're guessing, 'high' only if the fit is obvious."""
+confidence: 'low' if you're guessing, 'high' only if the fit is obvious. \
+A 'low' confidence decision will be recorded as a suggestion only, not an \
+assignment -- so there's no reason to inflate it."""
+
+
+def _format_corrections(corrections: List[Correction]) -> str:
+    if not corrections:
+        return "(none yet)"
+    return "\n".join(
+        f"- ticket {c.ticket_id}: corrected"
+        f"{f' from {c.from_agent}' if c.from_agent else ''} to {c.to_agent} "
+        f"-- {c.reason}"
+        for c in corrections
+    )
 
 
 def route_with_ai(
-    ticket: Ticket, agents: List[AgentEntry], mock_fixture: Optional[RouteDecision] = None
+    ticket: Ticket,
+    agents: List[AgentEntry],
+    corrections: Optional[List[Correction]] = None,
+    mock_fixture: Optional[RouteDecision] = None,
 ) -> RouteDecision:
     if MOCK_MODE:
         if mock_fixture is None:
@@ -64,6 +81,7 @@ def route_with_ai(
     ticket_text = (
         f"Title: {ticket.title}\nTags: {ticket.tags}\nBody:\n{ticket.body}"
     )
+    corrections_text = _format_corrections(corrections or [])
     response = client.messages.parse(
         model="claude-opus-5",
         max_tokens=1024,
@@ -71,7 +89,12 @@ def route_with_ai(
         messages=[
             {
                 "role": "user",
-                "content": f"Ticket:\n{ticket_text}\n\nAgent registry:\n{registry_text}",
+                "content": (
+                    f"Ticket:\n{ticket_text}\n\n"
+                    f"Agent registry:\n{registry_text}\n\n"
+                    f"Recent human corrections to past routing decisions "
+                    f"(weight these -- they're ground truth):\n{corrections_text}"
+                ),
             }
         ],
         output_format=RouteDecision,

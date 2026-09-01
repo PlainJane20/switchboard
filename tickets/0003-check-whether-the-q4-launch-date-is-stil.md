@@ -8,6 +8,16 @@ tags:
 - jira
 - launch-risk
 assignee: critical-path-radar
+routing:
+  method: deterministic
+  matched_tags:
+  - critical-path
+  - jira
+  - launch-risk
+  score: 3
+  justification: null
+  confidence: null
+  decided_at: '2026-08-31'
 ---
 
-Platform API work slipped two days. Does that push the Q4 launch milestone, and by how much slack do we still have.
+Platform API work slipped two days. Does that push the Q4 launch milestone.

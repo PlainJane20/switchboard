@@ -89,3 +89,105 @@ deterministic `route`, `dispatch`, `close`) never touches the network, so
 they didn't need a mock path to be tested offline. Mocking only the
 function that actually needs it, rather than a blanket mode switch on the
 whole CLI, keeps the tests honest about what's actually being faked.
+
+## Why low-confidence AI decisions don't auto-assign
+
+The first version of `cmd_route` treated any non-null `chosen_agent_id`
+from the AI router the same way, regardless of `confidence`. That's a real
+bug, not a style choice: a "low confidence, honestly guessing" decision
+and a "high confidence, obvious fit" decision looked identical on the
+board -- both just an assignee. The fix makes confidence gate the action:
+`medium`/`high` commits (status becomes `routed`, assignee is set); `low`
+is written into the ticket's `routing` field as a visible suggestion, but
+the ticket stays `open` and unassigned. A human has to `reroute` it to
+actually commit. This is the same "kill/redirect calls should be explicit,
+not implicit" judgment used elsewhere in this portfolio, applied to a
+routing decision instead of a program decision.
+
+## Why routing corrections are the one thing built specifically to beat Livery, not just match it
+
+Livery's ticket model has an `assignee` field, set by the human, full
+stop -- nothing in its documented behavior describes automatic
+content-based routing, and there's no feedback loop on assignment quality
+at all. Switchboard's `reroute` command exists to close that loop:
+every manual override is appended to `memory/routing_corrections.jsonl`
+(append-only, same convention as `ledger.md` and agent-control-tower's own
+`audit.jsonl`), and `route --ai` reads recent corrections back in as
+few-shot context on the next ambiguous ticket. This is not fine-tuning and
+it is not an embedding index -- it's plain text fed into a prompt, sourced
+from git history. That's a feature, not a limitation: `git log -p
+memory/routing_corrections.jsonl` shows the entire "training signal" a
+reviewer would need to audit, with no black box to trust.
+
+## Why dispatch attempts exist -- the other real gap versus Livery
+
+Livery's README is explicit: "Durable dispatch attempts under
+`.livery/dispatch/attempts/<attempt-id>.json`, with status, PID, failures...
+recorded per run." The first version of `dispatch.py` used a bare
+`subprocess.run()` -- no record survives the call, so "did that dispatch
+actually finish, and how" has no answer once the terminal scrolls. The fix
+uses `Popen` so the PID is captured the instant the process starts (not
+after), writes a `DispatchAttempt` record immediately with `status:
+running`, then updates it to `succeeded`/`failed` with the real exit code
+once the process exits. Tested against a real failure, not a synthetic
+one: dispatching a ticket to `tpm-agent-os` from inside this repo (where
+`run_demo.py` doesn't exist) correctly produced `status: failed,
+returncode: 2` -- proof the tracking works on an actual broken command,
+not just a mocked success path.
+
+Attempts live under `.switchboard/` and are gitignored on purpose -- see
+the next section for why that split matters.
+
+## Why attempts are ephemeral but corrections and ledger entries are not
+
+Three things get written after the fact in this system: dispatch
+attempts, ledger entries, and routing corrections. Only one of them is
+gitignored. A PID from an attempt three runs ago has no value once you
+know whether it succeeded -- keeping it in git history forever is noise.
+A ledger entry ("ticket X closed, here's why") and a routing correction
+("a human said Y, not Z, because...") are exactly the opposite: their
+entire value *is* being permanent, auditable history. Livery draws the
+same line -- `memory/` is git-tracked, `.livery/` is not -- for the same
+reason, and Switchboard's split matches it deliberately rather than by
+coincidence.
+
+## Why ticket-id allocation needs an actual lock
+
+`new_ticket` computes the next id by looking at the highest existing
+ticket file number and adding one. Two CLI invocations running at the same
+moment can both read the same "current highest" before either writes its
+new file, and one ticket silently overwrites the other's filename. The fix
+is an advisory lock around id allocation using `os.open(path,
+O_CREAT | O_EXCL)` -- atomic at the filesystem level, no dependency needed
+for one lock file. `test_concurrent_ticket_creation_never_collides` fires
+ten `new_ticket` calls at once from a thread pool and asserts all ten ids
+come out unique; without the lock, this test fails intermittently rather
+than deterministically, which is exactly the kind of bug that's easy to
+ship and hard to catch without a test built to provoke it.
+
+## Why Talk doesn't invoke the agent's real `invoke` command
+
+`switchboard talk <agent-id> "question"` answers from the agent's registry
+*description* only -- it never shells out to the agent's actual `invoke`
+command. The alternative (actually running the agent to answer "would you
+handle X") would mean every advisory question that starts with "would
+you..." has the exact same side effects and runtime cost as a real
+dispatch, including for `risk_tier: medium` agents like `inbox-marshal`
+that can archive email. Livery draws the identical line between Talk
+(conversation, spawns the runtime in print mode, told explicitly not to
+modify files or launch long-running work) and Dispatch (an actual task) --
+Switchboard's version of that boundary is simpler (no runtime spawn at
+all for Talk, just a system prompt built from the registry entry) but
+enforces the same guarantee: asking a question is never itself an action.
+
+## The honest comparison to Livery, restated
+
+Livery is not a strawman here -- it has real capabilities Switchboard
+doesn't: multi-runtime adapters (Claude Code, Codex, Cursor, LM Studio,
+Ollama), scheduling via `launchd`/`systemd`, "Walkie-Talkie" for AI-to-AI
+debate, and Telegram notifications. None of that is reimplemented here,
+and pretending otherwise would be dishonest. What Switchboard does instead
+is go deep on the job Livery leaves manual -- routing -- and be strictly
+better at that one thing: automatic instead of manual, self-correcting
+instead of static, and auditable (`routing` on every ticket, a durable
+attempt record per dispatch) in ways a plain `assignee` field never was.
