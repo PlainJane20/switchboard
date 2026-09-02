@@ -55,6 +55,23 @@ match either way, and — the part that doesn't exist anywhere else in this
 space — **remembers every time a human corrects it**, so the next
 ambiguous ticket benefits from that correction as prompt context.
 
+**Why I built it:** this is a personal project, built to get real practice
+designing a deterministic-first, LLM-fallback decision system — the same
+shape shows up anywhere you need fast, free, auditable defaults with an
+escalation path for genuine ambiguity, not just agent routing. The
+correction-memory loop specifically was practice building feedback into a
+system rather than shipping a static ruleset once and walking away.
+
+## Competencies demonstrated
+
+| Competency | Observable evidence |
+|---|---|
+| Deterministic-first system design | Tag-overlap matching runs before any model call, so the common case is instant and free |
+| Graceful escalation | Claude is only invoked when the deterministic pass is genuinely ambiguous, with an honest refusal path if nothing fits |
+| Feedback-loop design | Every human correction (`reroute`) is recorded and fed back into the router's own prompt as ground truth |
+| Independent implementation from a shared idea | Built from scratch against Livery's concept, no shared code — see [attribution](#how-this-compares-to-livery) |
+| Honest self-assessment | The comparison table below states where this is ahead of Livery and where it's still behind, not just the flattering parts |
+
 **Explore:** [vs. Livery](#how-this-compares-to-livery) · [How it works](#how-it-works) · [Architecture](#architecture) · [Real findings](#real-findings-from-building-and-testing-this) · [Setup](#setup) · [Usage](#usage)
 
 ---
