@@ -37,6 +37,13 @@ aimed at doing the one thing Livery leaves to a human: **deciding which
 agent a ticket should go to**, automatically, better than a manually-set
 `assignee` field can.
 
+**Related work in this portfolio:** [muster](https://github.com/PlainJane20/muster)
+and [taskloom](https://github.com/PlainJane20/taskloom) are two more
+independent takes on the same underlying interest, not a connected
+pipeline with this one — muster is the manual-assignment CLI baseline
+this repo adds automatic routing on top of (as an idea, not shared
+code); taskloom takes the visual-desktop-app angle instead.
+
 ### Why this exists
 
 Manually deciding "which agent should handle this" doesn't scale past a
