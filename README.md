@@ -77,10 +77,8 @@ specifically at the one job it does:
 | **Live agent runtime** | 5 real adapters (Claude Code, Codex, Cursor, LM Studio, Ollama) | **One real adapter** (`claude -p`, verified against the installed CLI, not guessed) — narrower, but genuinely live, with real tool access |
 | **Schedule installation** | Installs `launchd`/`systemd` jobs directly | **Yes, gated** — `schedule-install --apply` writes the real file and activates it; the bare command is a dry run |
 
-The honest summary: Livery still has more runtime breadth (5 adapters vs.
-1) and a smaller safety gate on installing what it schedules. Everything
-else in this table, Switchboard either matches or is ahead on — including
-now having *a* real live agent runtime, not just command strings, and
+The honest summary: Livery still has more runtime breadth (5 adapters vs.1) and a smaller safety gate on installing what it schedules. Everything
+else in this table, Switchboard either matches or is ahead on — including now having *a* real live agent runtime, not just command strings, and
 real (if explicitly gated) schedule installation.
 
 ---
