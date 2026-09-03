@@ -21,7 +21,7 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 
 <div align="center">
 
-| 8 registered agents | 2 runtimes | 8 gaps closed vs. Livery | 41 tests |
+| 8 registered agents | 2 runtimes | 9-point comparison vs. Livery | 41 tests |
 |:---:|:---:|:---:|:---:|
 | One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Fully offline, zero API key |
 
