@@ -3,8 +3,8 @@
 Tiers, on purpose -- the same cost/judgment split used across this
 portfolio (see tpm-agent-os's model-tiering rationale): a free, instant,
 fully deterministic tag-match router handles the common case, and an
-LLM-assisted router is only invoked when that's genuinely ambiguous (no
-agent scores above zero) or explicitly requested with --ai. Most tickets
+LLM-assisted router is only invoked when the tag-match finds nothing (no
+agent scores above zero) and --ai (or --jev) was passed. Most tickets
 never need to spend a model call just to be routed.
 """
 

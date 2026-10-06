@@ -21,7 +21,7 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 
 <div align="center">
 
-| 8 registered agents | 2 runtimes | 9-point self-comparison vs. Livery (author's own, unverified) | 61 tests |
+| 8 registered agents | 2 runtimes | 9-point self-comparison vs. Livery (author's own, unverified) | 78 tests |
 |:---:|:---:|:---:|:---:|
 | One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Tests run offline with `SWITCHBOARD_MOCK=1` (no API key); real `--ai`, `talk` and `debate` calls need one |
 
@@ -49,8 +49,8 @@ agent a ticket should go to**, automatically, better than a manually-set
 Manually deciding "which agent should handle this" doesn't scale past a
 handful of agents, and asking an LLM every single time is slow and costs
 money for decisions that are usually obvious. Switchboard's router is
-deterministic by default (instant, free, tag-overlap matching), escalates
-to Claude only when that's genuinely ambiguous, refuses to force a bad
+deterministic by default (instant, free, tag-overlap matching), falls
+back to a model only when no tag overlaps at all (and only if you pass `--jev` or `--ai`), refuses to force a bad
 match either way, and — the part that doesn't exist anywhere else in this
 space — **records every time a human corrects it**, and the `--ai` router is shown
 the 10 most recent corrections as prompt context on later calls (the
@@ -76,7 +76,7 @@ deterministic router does not use them).
 | Competency | Observable evidence |
 |---|---|
 | Deterministic-first system design | Tag-overlap matching runs before any model call, so the common case is instant and free |
-| Graceful escalation | Claude is only invoked when the deterministic pass is genuinely ambiguous, with an honest refusal path if nothing fits |
+| Graceful escalation | A model is consulted only when no tag overlaps and `--jev`/`--ai` is passed (any overlap above zero is routed deterministically, even a weak one), with an honest refusal path if nothing fits |
 | Feedback-loop design | Every human correction (`reroute`) is recorded; the 10 most recent are included in the `--ai` router's prompt (the deterministic router ignores them) |
 | Independent implementation from a shared idea | Built from scratch against Livery's concept, no shared code — see [attribution](#how-this-compares-to-livery) |
 | Honest self-assessment | The comparison table below is the author's own, unverified, and tries to state where this is behind as well as ahead |
@@ -162,7 +162,7 @@ in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | Finding | What changed |
 |---|---|
-| A router that always answers trains you to stop checking the answer | `route_deterministic` returns `None` below a real tag match instead of always producing its highest-scoring guess |
+| A router that always answers trains you to stop checking the answer | `route_deterministic` returns `None` when no tag overlaps instead of always producing its highest-scoring guess |
 | Confidence has to gate the action, not just get logged next to it | Only medium/high AI confidence commits an assignment; low confidence is a recorded suggestion, ticket stays open |
 | A fire-and-forget `subprocess.run` is a real robustness gap | `--run` now uses `Popen` (PID captured at start) through to a `DispatchAttempt` record — proven against a real failure, not mocked (see below) |
 | Concurrent ticket creation needs an actual lock | `O_CREAT\|O_EXCL` advisory lock around id allocation; a 10-thread test proves it |
@@ -247,7 +247,8 @@ human. Jev is TypeSafe's decision model, called through Pydantic AI
   confidences. Buckets (defined once in `models.confidence_bucket`): `>= 0.8`
   high, `>= 0.5` medium, otherwise low. High/medium on a registered agent is
   assigned; low, `none`, an unregistered id, or an error falls through to `--ai`
-  if given, otherwise the ticket stays open with Jev's suggestion stored.
+  if given. Without `--ai`, a low or `none` result stores Jev's suggestion and
+  leaves the ticket open; an unregistered id or an error just leaves it unrouted.
 - **Persisted:** the ticket's `routing` block records `method: jev`,
   `confidence`, `confidence_p` and `scores` (agent to probability). Older
   tickets without these fields still load.
@@ -259,9 +260,11 @@ clients). Live Jev behavior and the response shape were verified separately on
 the standalone router benchmark in `jev-agent-router`, not through Switchboard.
 No live Switchboard + Jev run has been done.
 
+Optional OpenTelemetry tracing of routing, dispatch and correction memory is described in [docs/TRACING.md](docs/TRACING.md).
+
 ## Running the tests
 
-The 61 tests run offline (they set `SWITCHBOARD_MOCK=1`, so no API key or
+The 78 tests run offline (they set `SWITCHBOARD_MOCK=1`, so no API key or
 network is needed). Real `route --ai`, `talk` and `debate` calls are not
 mocked outside the tests and do need `ANTHROPIC_API_KEY`. Tested on
 Python 3.9 and 3.14.
@@ -269,7 +272,7 @@ Python 3.9 and 3.14.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest tests/ -v             # 61 passed
+pytest tests/ -v             # 78 passed
 ```
 
 **Risk tiers are advisory.** `risk_tier: medium|high` on an agent only

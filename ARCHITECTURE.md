@@ -31,8 +31,8 @@ The same cost/judgment split as tpm-agent-os's model tiering, applied to a
 different decision: most tickets tag-match an obvious agent (a ticket
 tagged `email, cleanup` obviously goes to `inbox-marshal`), and spending an
 API call to confirm the obvious is waste. The AI router only runs when the
-deterministic pass finds zero tag overlap with any registered agent, or
-when explicitly requested with `--ai`. That also means the core dispatch
+deterministic pass finds zero tag overlap with any registered agent *and*
+`--ai` (or `--jev`) was passed; with a tag match, `--ai` is never consulted. That also means the core dispatch
 loop has zero external dependency in the common case -- `agents`, `new`,
 `list`, `board`, and a tag-matching `route` all work with no API key and no
 network.
