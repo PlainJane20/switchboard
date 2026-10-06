@@ -12,7 +12,7 @@ from switchboard import attempts as attempts_mod
 from switchboard import debate as debate_mod
 from switchboard import dispatch as dispatch_mod
 from switchboard import notify as notify_mod
-from switchboard import memory, registry, router, schedule as schedule_mod, talk, tickets
+from switchboard import memory, registry, router, schedule as schedule_mod, talk, tickets, tracing
 from switchboard.models import Correction, RoutingRationale, Schedule
 
 STATUS_EMOJI = {
@@ -104,16 +104,26 @@ def cmd_ticket_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def _try_jev(args, ticket, agents, today):
+def _try_jev(args, ticket, agents, today, root=None):
     """Jev tier. Returns an exit code if it settled the ticket (assigned it,
     or -- with no --ai to fall back to -- stored its suggestion), or None to
     fall through to the next tier."""
     corrections = memory.load_corrections(limit=10)
-    try:
-        decision = router.route_with_jev(ticket, agents, corrections=corrections)
-    except router.JevUnavailable as e:
-        print(f"Jev router unavailable ({e}) -- falling through.")
-        return None
+    root = root if root is not None else tracing._NOOP
+    with tracing.span("route.jev", agents=len(agents)) as jspan:
+        try:
+            decision = router.route_with_jev(ticket, agents, corrections=corrections)
+        except router.JevUnavailable as e:
+            tracing.set_attrs(jspan, outcome="unavailable")
+            tracing.set_attrs(root, **{"route.fallthrough_reason": "jev_unavailable"})
+            print(f"Jev router unavailable ({e}) -- falling through.")
+            return None
+        tracing.set_attrs(
+            jspan,
+            outcome="decided" if decision.chosen_agent_id else "abstained",
+            confidence=decision.confidence,
+            confidence_p=decision.confidence_p,
+        )
     p = "n/a" if decision.confidence_p is None else f"{decision.confidence_p:.2f}"
     print(f"Jev router: {decision.chosen_agent_id} ({decision.confidence} confidence, p={p})")
     rationale = RoutingRationale(
@@ -127,16 +137,22 @@ def _try_jev(args, ticket, agents, today):
     matched = next((a for a in agents if a.id == decision.chosen_agent_id), None)
     if decision.chosen_agent_id is not None and matched is None:
         print(f"Jev chose {decision.chosen_agent_id!r}, which isn't a registered agent id -- falling through.")
+        tracing.set_attrs(root, **{"route.fallthrough_reason": "jev_unknown_agent"})
         return None
     if matched is not None and decision.confidence in ("high", "medium"):
         tickets.update_ticket(
             ticket.id, status="routed", assignee=matched.id, routing=rationale
         )
+        _trace_decision(root, "jev", decision.confidence, decision.confidence_p, "routed", matched.id)
         print(f"Ticket {ticket.id} routed to {matched.id}.")
         return 0
     if args.ai:
         reason = "abstained" if matched is None else "low confidence"
         print(f"Jev {reason} -- falling through to Claude (--ai).")
+        tracing.set_attrs(
+            root,
+            **{"route.fallthrough_reason": "jev_abstained" if matched is None else "jev_low_confidence"},
+        )
         return None
     if matched is None:
         print("Jev found no suitable agent -- leaving unrouted for a human to triage.")
@@ -147,16 +163,44 @@ def _try_jev(args, ticket, agents, today):
             "to actually commit to an agent."
         )
     tickets.update_ticket(ticket.id, routing=rationale)
+    _trace_decision(
+        root, "jev", decision.confidence, decision.confidence_p,
+        "unrouted" if matched is None else "suggested",
+        matched.id if matched else None,
+    )
     notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
     return 1
 
 
+def _trace_decision(root, method, confidence, confidence_p, outcome, agent_id):
+    tracing.set_attrs(
+        root,
+        **{
+            "route.method": method,
+            "route.confidence": confidence,
+            "route.confidence_p": confidence_p,
+            "route.outcome": outcome,
+            "route.agent_id": agent_id,
+        },
+    )
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     ticket = tickets.load_ticket(args.ticket_id)
+    with tracing.span("route", ticket_id=ticket.id) as root:
+        rc = _route(args, ticket, root)
+        tracing.set_attrs(root, **{"route.exit_code": rc})
+        return rc
+
+
+def _route(args: argparse.Namespace, ticket, root) -> int:
     agents = registry.load_agents()
     today = date.today()
+    tracing.set_attrs(root, **{"route.agent_count": len(agents)})
 
-    agent, score = router.route_deterministic(ticket, agents)
+    with tracing.span("route.deterministic") as dspan:
+        agent, score = router.route_deterministic(ticket, agents)
+        tracing.set_attrs(dspan, matched=agent is not None, score=score)
     if agent is not None:
         print(f"Deterministic match: {agent.id} (tag overlap score {score})")
         matched = sorted(set(t.lower() for t in ticket.tags) & set(t.lower() for t in agent.tags))
@@ -164,15 +208,21 @@ def cmd_route(args: argparse.Namespace) -> int:
             method="deterministic", matched_tags=matched, score=score, decided_at=today
         )
         tickets.update_ticket(args.ticket_id, status="routed", assignee=agent.id, routing=rationale)
+        _trace_decision(root, "deterministic", None, None, "routed", agent.id)
+        tracing.set_attrs(root, **{"route.score": score})
         print(f"Ticket {args.ticket_id} routed to {agent.id}.")
         return 0
 
-    if getattr(args, "jev", False) or os.environ.get("SWITCHBOARD_BACKEND") == "jev":
-        outcome = _try_jev(args, ticket, agents, today)
+    jev_tried = bool(getattr(args, "jev", False) or os.environ.get("SWITCHBOARD_BACKEND") == "jev")
+    if jev_tried:
+        outcome = _try_jev(args, ticket, agents, today, root)
         if outcome is not None:
             return outcome
 
     if not args.ai:
+        tracing.set_attrs(root, **{"route.method": "none", "route.outcome": "unrouted"})
+        if not jev_tried:
+            tracing.set_attrs(root, **{"route.fallthrough_reason": "no_model_requested"})
         print(
             "No deterministic match (no shared tags with any registered "
             "agent). Re-run with --jev or --ai to ask a model, or assign "
@@ -182,7 +232,13 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 1
 
     corrections = memory.load_corrections(limit=10)
-    decision = router.route_with_ai(ticket, agents, corrections=corrections)
+    with tracing.span("route.claude", agents=len(agents)) as cspan:
+        decision = router.route_with_ai(ticket, agents, corrections=corrections)
+        tracing.set_attrs(
+            cspan,
+            outcome="decided" if decision.chosen_agent_id else "abstained",
+            confidence=decision.confidence,
+        )
     print(f"AI router: {decision.chosen_agent_id} ({decision.confidence} confidence)")
     print(f"  Reasoning: {decision.justification}")
 
@@ -196,6 +252,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     if decision.chosen_agent_id is None:
         print("AI router found no suitable agent -- leaving unrouted for a human to triage.")
         tickets.update_ticket(args.ticket_id, routing=rationale)
+        _trace_decision(root, "ai", decision.confidence, None, "unrouted", None)
         notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
 
@@ -206,17 +263,20 @@ def cmd_route(args: argparse.Namespace) -> int:
             "to actually commit to an agent."
         )
         tickets.update_ticket(args.ticket_id, routing=rationale)
+        _trace_decision(root, "ai", decision.confidence, None, "suggested", decision.chosen_agent_id)
         notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
 
     matched_agent = next((a for a in agents if a.id == decision.chosen_agent_id), None)
     if matched_agent is None:
         print(f"AI router chose {decision.chosen_agent_id!r}, which isn't a registered agent id.")
+        _trace_decision(root, "ai", decision.confidence, None, "unknown_agent", None)
         return 1
 
     tickets.update_ticket(
         args.ticket_id, status="routed", assignee=matched_agent.id, routing=rationale
     )
+    _trace_decision(root, "ai", decision.confidence, None, "routed", matched_agent.id)
     print(f"Ticket {args.ticket_id} routed to {matched_agent.id}.")
     return 0
 

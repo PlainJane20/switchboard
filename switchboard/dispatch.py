@@ -26,6 +26,7 @@ from typing import Optional
 from switchboard import attempts as attempts_mod
 from switchboard import claude_runtime
 from switchboard import notify as notify_mod
+from switchboard import tracing
 from switchboard.models import AgentEntry, DispatchAttempt, Ticket
 
 
@@ -40,9 +41,29 @@ def _build_claude_code_prompt(ticket: Ticket) -> str:
 def dispatch(
     agent: AgentEntry, ticket: Ticket, ticket_path: Path, run: bool = False
 ) -> Optional[DispatchAttempt]:
-    if agent.runtime == "claude_code":
-        return _dispatch_claude_code(agent, ticket, run=run)
-    return _dispatch_command(agent, ticket, ticket_path, run=run)
+    with tracing.span(
+        "dispatch",
+        agent_id=agent.id,
+        ticket_id=ticket.id,
+        runtime=agent.runtime,
+        risk_tier=agent.risk_tier,
+        run=run,
+    ) as s:
+        if agent.runtime == "claude_code":
+            attempt = _dispatch_claude_code(agent, ticket, run=run)
+        else:
+            attempt = _dispatch_command(agent, ticket, ticket_path, run=run)
+        # Only the outcome: never the command line, prompt or ticket body.
+        tracing.set_attrs(
+            s,
+            **{
+                "dispatch.prepared_only": attempt is None,
+                "dispatch.attempt_id": attempt.id if attempt else None,
+                "dispatch.status": attempt.status if attempt else None,
+                "dispatch.exit_code": attempt.returncode if attempt else None,
+            },
+        )
+        return attempt
 
 
 def _dispatch_command(

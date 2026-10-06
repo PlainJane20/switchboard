@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
+from switchboard import tracing
 from switchboard.models import Correction
 
 DEFAULT_CORRECTIONS_PATH = Path("memory/routing_corrections.jsonl")
@@ -34,11 +35,15 @@ def append_correction(
 def load_corrections(
     path: Path = DEFAULT_CORRECTIONS_PATH, limit: Optional[int] = None
 ) -> List[Correction]:
-    if not path.exists():
-        return []
-    corrections = [
-        Correction(**json.loads(line))
-        for line in path.read_text().splitlines()
-        if line.strip()
-    ]
-    return corrections[-limit:] if limit else corrections
+    with tracing.span("memory.load_corrections", limit=limit) as s:
+        if not path.exists():
+            tracing.set_attrs(s, count=0)
+            return []
+        corrections = [
+            Correction(**json.loads(line))
+            for line in path.read_text().splitlines()
+            if line.strip()
+        ]
+        result = corrections[-limit:] if limit else corrections
+        tracing.set_attrs(s, count=len(result))
+        return result

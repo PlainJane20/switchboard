@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "opentelemetry-sdk>=1.20"]
+tracing = ["opentelemetry-api>=1.20"]
 
 [project.scripts]
 switchboard = "switchboard.cli:main"
