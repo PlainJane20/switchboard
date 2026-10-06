@@ -63,6 +63,14 @@ deterministic router does not use them).
 > correction-memory loop specifically was practice building feedback into a
 > system rather than shipping a static ruleset once and walking away.
 
+## Architecture pattern
+
+**Router/Dispatcher.** `switchboard/router.py` picks one agent for a ticket (`route_deterministic`, then optionally `route_with_jev` or `route_with_ai`), and `switchboard/dispatch.py` hands the ticket to that agent's runtime. Switchboard does the choosing and handing off; the registered agents do the work, and Switchboard does not run an agent loop or combine their outputs.
+
+- **Deterministic vs model-driven:** Routing starts with tag-overlap scoring and accepts any score above zero. A model is consulted only when no tag overlaps and the user passes `--jev` or `--ai` (`cli.py`, `cmd_route`); that means "no match", not a judgement of ambiguity, so a weak one-tag overlap is routed without a model check. Low model confidence is recorded as a suggestion and leaves the ticket unassigned. Dispatch itself is deterministic.
+- **Human gate:** Dispatch only prints the command unless `--run` is given. Corrections via `reroute` are recorded, and the last 10 are shown to the `--ai` router only.
+- **Honest limit:** It is a one-shot router, so there is no planning, no multi-step coordination between agents and no check on the quality of an agent's result. The two-persona `debate` mode is one model playing both sides, not independent agents.
+
 ## Competencies demonstrated
 
 | Competency | Observable evidence |
