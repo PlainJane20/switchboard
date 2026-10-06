@@ -21,9 +21,9 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 
 <div align="center">
 
-| 8 registered agents | 2 runtimes | 9-point comparison vs. Livery | 41 tests |
+| 8 registered agents | 2 runtimes | 9-point self-comparison vs. Livery (author's own, unverified) | 41 tests |
 |:---:|:---:|:---:|:---:|
-| One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Fully offline, zero API key |
+| One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Tests run offline with `SWITCHBOARD_MOCK=1` (no API key); real `--ai`, `talk` and `debate` calls need one |
 
 </div>
 
@@ -52,8 +52,9 @@ money for decisions that are usually obvious. Switchboard's router is
 deterministic by default (instant, free, tag-overlap matching), escalates
 to Claude only when that's genuinely ambiguous, refuses to force a bad
 match either way, and — the part that doesn't exist anywhere else in this
-space — **remembers every time a human corrects it**, so the next
-ambiguous ticket benefits from that correction as prompt context.
+space — **records every time a human corrects it**, and the `--ai` router is shown
+the 10 most recent corrections as prompt context on later calls (the
+deterministic router does not use them).
 
 > **Why I built it:** this is a personal project, built to get real practice
 > designing a deterministic-first, LLM-fallback decision system — the same
@@ -68,9 +69,9 @@ ambiguous ticket benefits from that correction as prompt context.
 |---|---|
 | Deterministic-first system design | Tag-overlap matching runs before any model call, so the common case is instant and free |
 | Graceful escalation | Claude is only invoked when the deterministic pass is genuinely ambiguous, with an honest refusal path if nothing fits |
-| Feedback-loop design | Every human correction (`reroute`) is recorded and fed back into the router's own prompt as ground truth |
+| Feedback-loop design | Every human correction (`reroute`) is recorded; the 10 most recent are included in the `--ai` router's prompt (the deterministic router ignores them) |
 | Independent implementation from a shared idea | Built from scratch against Livery's concept, no shared code — see [attribution](#how-this-compares-to-livery) |
-| Honest self-assessment | The comparison table below states where this is ahead of Livery and where it's still behind, not just the flattering parts |
+| Honest self-assessment | The comparison table below is the author's own, unverified, and tries to state where this is behind as well as ahead |
 
 **Explore:** [vs. Livery](#how-this-compares-to-livery) · [How it works](#how-it-works) · [Architecture](#architecture) · [Real findings](#real-findings-from-building-and-testing-this) · [Setup](#setup) · [Usage](#usage)
 
@@ -79,24 +80,24 @@ ambiguous ticket benefits from that correction as prompt context.
 ## How this compares to Livery
 
 Livery is a broader, more mature tool — this isn't a claim to have built
-something bigger. It's narrower on purpose, and better than Livery
-specifically at the one job it does:
+something bigger. It's narrower on purpose. The table below is the
+author's own comparison; it has not
+been independently verified against Livery's current behavior, so treat
+its claims about Livery as unconfirmed.
 
 | | Livery | Switchboard |
 |---|---|---|
 | **Agent-to-ticket assignment** | Manual — you set `assignee` yourself | **Automatic** — deterministic tag-match first, Claude-assisted fallback, honest refusal if nothing fits |
-| **Learns from correction** | No feedback loop on assignment quality | **Yes** — every `reroute` is recorded and fed back into the AI router's prompt as ground truth |
+| **Learns from correction** | No feedback loop on assignment quality (per the author's reading) | **Partially** — every `reroute` is recorded; only the last 10 are injected into the `--ai` router's prompt. The deterministic router ignores them. No fine-tuning or retraining. |
 | **Talk mode** (advisory Q&A) | Yes | **Yes** — `switchboard talk <agent-id> "question"` |
-| **Walkie-Talkie** (AI-to-AI debate) | Two real hired agents, each in their own runtime | **Adapted** — two agent *personas* debate a ticket; honest about the difference below |
+| **Walkie-Talkie** (AI-to-AI debate) | Two real hired agents, each in their own runtime | **Adapted** — a single LLM (Claude) plays two agent *personas* in alternating turns; these are not independent agents or runtimes |
 | **Scheduling** | `launchd`/`systemd` jobs, installed by the CLI | **Declared + rendered**, never auto-installed |
 | **Notifications** | Telegram-specific | **Generic** — desktop notification plus any webhook (Slack, Discord, Telegram, plain HTTP) |
 | **Routing rationale on the ticket** | Not applicable (no auto-routing) | Every routed ticket carries *why*, as permanent git-diffable history |
 | **Live agent runtime** | 5 real adapters (Claude Code, Codex, Cursor, LM Studio, Ollama) | **One real adapter** (`claude -p`, verified against the installed CLI, not guessed) — narrower, but genuinely live, with real tool access |
 | **Schedule installation** | Installs `launchd`/`systemd` jobs directly | **Yes, gated** — `schedule-install --apply` writes the real file and activates it; the bare command is a dry run |
 
-The honest summary: Livery still has more runtime breadth (5 adapters vs.1) and a smaller safety gate on installing what it schedules. Everything
-else in this table, Switchboard either matches or is ahead on — including now having *a* real live agent runtime, not just command strings, and
-real (if explicitly gated) schedule installation.
+The author's summary (unverified): Livery appears to have more runtime breadth (5 adapters vs. 1) and a smaller safety gate on installing what it schedules. On the other rows, the author believes Switchboard matches or is ahead, including now having *a* real live agent runtime, not just command strings, and real (if explicitly gated) schedule installation.
 
 ---
 
@@ -104,13 +105,13 @@ real (if explicitly gated) schedule installation.
 
 1. File a ticket — a markdown file with a title, tags, and a body, created via one CLI call
 2. The **deterministic router** scores every registered agent by tag overlap and assigns the best match — no API call, no network
-3. If no agent shares a single tag, the ticket stays **unrouted** unless you explicitly ask the **AI router** (Claude) — enriched with recent human corrections as few-shot context, and still allowed to say none of them fit
+3. If no agent shares a single tag, the ticket stays **unrouted** unless you explicitly ask the **AI router** (Claude) — enriched with the 10 most recent human corrections as prompt context, and still allowed to say none of them fit
 4. A **low-confidence** AI decision is recorded as a *suggestion*, not an assignment — the ticket stays open until a human commits to it
-5. **`reroute`** lets a human override any decision, and permanently records why — that correction improves every future ambiguous routing call
-6. **Dispatch** composes the exact shell command (or, for a `claude_code` agent, a live session prompt) that would send the ticket to its assigned agent, and prints it by default — `--run` executes it for real, with a durable attempt record and a warning for medium/high-risk agents
+5. **`reroute`** lets a human override any decision, and permanently records why — the 10 most recent corrections are included in the prompt of later `--ai` routing calls (the deterministic router ignores them)
+6. **Dispatch** composes the exact shell command (or, for a `claude_code` agent, a live session prompt) that would send the ticket to its assigned agent, and prints it by default — `--run` executes it for real, with a durable attempt record and a printed warning for medium/high-risk agents (risk tiers are advisory: the warning never blocks a run)
 7. **Close** a ticket and it's appended to `ledger.md` — an append-only audit trail, never rewritten
 8. **Talk** to any registered agent directly — no ticket filed, nothing dispatched
-9. **Debate** a ticket between two agent personas when it's genuinely unclear whose job it is
+9. **Debate** a ticket between two agent personas when it's genuinely unclear whose job it is — both sides are the same LLM speaking as each persona, not two independent agents
 10. **Schedule** a recurring dispatch declaratively, render it into a real `launchd`/`systemd` unit, and optionally **install** it for real — gated behind an explicit `--apply`, never a side effect of anything else
 11. Get **notified** — desktop notification or webhook — the moment a ticket needs a human or a dispatch fails
 
@@ -139,7 +140,7 @@ flowchart TD
 ```
 
 Full agent-by-agent, decision-by-decision design rationale — including a
-line-by-line comparison against Livery's actual documented behavior — is
+comparison against Livery (the author's own, unverified) — is
 in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
@@ -211,9 +212,24 @@ session id and real cost tracked:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"      # installs the real `switchboard` command
-cp .env.example .env          # only needed for `route --ai` and `talk`
-pytest tests/ -v              # fully offline, no API key required
+cp .env.example .env          # API key: needed for real `route --ai`, `talk`, `debate` (not for tests)
 ```
+
+## Running the tests
+
+The 41 tests run offline (they set `SWITCHBOARD_MOCK=1`, so no API key or
+network is needed). Real `route --ai`, `talk` and `debate` calls are not
+mocked outside the tests and do need `ANTHROPIC_API_KEY`. Tested on
+Python 3.9 and 3.14.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest tests/ -v             # 41 passed
+```
+
+**Risk tiers are advisory.** `risk_tier: medium|high` on an agent only
+prints a `WARNING` when you dispatch with `--run`; it never blocks execution.
 
 ## Usage
 
@@ -320,7 +336,7 @@ switchboard/
 ├── walkie-talkie/                Debate transcripts (created on first use)
 ├── schedules/                    Declared recurring dispatches, one file each
 ├── ledger.md                     Append-only record of closed tickets
-├── tests/                        Fully offline (SWITCHBOARD_MOCK=1 for the AI router)
+├── tests/                        Offline (SWITCHBOARD_MOCK=1 stubs the AI calls)
 └── ARCHITECTURE.md               Design rationale, decision by decision
 ```
 
