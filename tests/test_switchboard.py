@@ -555,3 +555,262 @@ def test_install_systemd_apply_writes_both_units(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Jev backend (offline: SWITCHBOARD_JEV_MOCK fixture files and stub clients)
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+
+from switchboard import cli  # noqa: E402
+from switchboard.models import confidence_bucket  # noqa: E402
+
+SECOND_AGENT_FIXTURE = AGENT_FIXTURE.replace("test-agent", "other-agent").replace(
+    "[alpha, beta]", "[gamma]"
+)
+
+
+def _details(choice_probs, conf=1.0):
+    return {
+        "confidence": {"response": conf},
+        "probabilities": {"response": choice_probs},
+        "scores": {},
+    }
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    """cmd_route works on cwd-relative agents/ tickets/ memory/, so run in tmp."""
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "tickets").mkdir()
+    (tmp_path / "agents" / "test-agent.md").write_text(AGENT_FIXTURE)
+    (tmp_path / "agents" / "other-agent.md").write_text(SECOND_AGENT_FIXTURE)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SWITCHBOARD_JEV_MOCK", raising=False)
+    monkeypatch.delenv("SWITCHBOARD_BACKEND", raising=False)
+    monkeypatch.setattr(cli.notify_mod, "notify", lambda *a, **k: None)
+    return tmp_path
+
+
+def _args(ticket_id, jev=True, ai=False):
+    return argparse.Namespace(ticket_id=ticket_id, jev=jev, ai=ai)
+
+
+def _mock(tmp_path, monkeypatch, choice, probs, conf=1.0):
+    path = tmp_path / "jev_fixture.json"
+    path.write_text(json.dumps({"choice": choice, "provider_details": _details(probs, conf)}))
+    monkeypatch.setenv("SWITCHBOARD_JEV_MOCK", str(path))
+
+
+def _untagged(title="Mystery work"):
+    return tickets.new_ticket(title=title, tags=["zeta"])
+
+
+def test_confidence_bucket_thresholds():
+    assert confidence_bucket(1.0) == "high"
+    assert confidence_bucket(0.8) == "high"
+    assert confidence_bucket(0.79) == "medium"
+    assert confidence_bucket(0.5) == "medium"
+    assert confidence_bucket(0.49) == "low"
+    assert confidence_bucket(None) == "low"
+
+
+def test_jev_enum_built_dynamically_from_agents(workspace):
+    agents_dir, _ = workspace
+    agents = registry.load_agents(agents_dir)
+    enum_cls = router.build_jev_enum(agents)
+    assert {m.value for m in enum_cls} == {"test-agent", "none"}
+    agents.append(AgentEntry(id="extra-agent", name="Extra", repo="x"))
+    assert {m.value for m in router.build_jev_enum(agents)} == {
+        "test-agent", "extra-agent", "none"
+    }
+
+
+def test_jev_enum_abstain_label_avoids_id_collision():
+    agents = [AgentEntry(id="none", name="N", repo="x")]
+    assert {m.value for m in router.build_jev_enum(agents)} == {"none", "_none"}
+
+
+def test_jev_instructions_spell_out_each_agents_criteria(workspace):
+    agents_dir, _ = workspace
+    text = router.build_jev_instructions(registry.load_agents(agents_dir))
+    assert "test-agent" in text and "alpha" in text and "none" in text
+
+
+def test_jev_stub_client_receives_enum_and_parses_details(workspace):
+    agents_dir, tickets_dir = workspace
+    agents = registry.load_agents(agents_dir)
+    ticket = tickets.new_ticket(title="T", tickets_dir=tickets_dir)
+    seen = {}
+
+    def stub(enum_cls, instructions, prompt):
+        seen["values"] = {m.value for m in enum_cls}
+        seen["instructions"] = instructions
+        return "test-agent", _details({"test-agent": 0.9, "none": 0.1}, conf=0.9)
+
+    d = router.route_with_jev(ticket, agents, client=stub)
+    assert seen["values"] == {"test-agent", "none"}
+    assert "test-agent" in seen["instructions"]
+    assert d.chosen_agent_id == "test-agent"
+    assert d.confidence_p == 0.9 and d.confidence == "high"
+    assert d.scores == {"test-agent": 0.9, "none": 0.1}
+
+
+def test_jev_confidence_is_minimum_of_confidence_dict(workspace):
+    agents_dir, tickets_dir = workspace
+    agents = registry.load_agents(agents_dir)
+    ticket = tickets.new_ticket(title="T", tickets_dir=tickets_dir)
+    details = {
+        "confidence": {"a": 0.95, "b": 0.6},
+        "probabilities": {"a": {"test-agent": 1.0}, "b": {"none": 1.0}},
+    }
+    d = router.route_with_jev(
+        ticket, agents, client=lambda e, i, p: ("test-agent", details)
+    )
+    assert d.confidence_p == 0.6 and d.confidence == "medium"
+    assert d.scores == {"test-agent": 1.0}  # first probabilities value
+
+
+def test_jev_skipped_when_too_many_agents(workspace):
+    _, tickets_dir = workspace
+    ticket = tickets.new_ticket(title="T", tickets_dir=tickets_dir)
+    agents = [AgentEntry(id=f"a{i}", name="n", repo="x") for i in range(251)]
+    called = []
+    with pytest.raises(router.JevUnavailable):
+        router.route_with_jev(ticket, agents, client=lambda *a: called.append(1))
+    assert not called
+
+
+def test_jev_high_confidence_assigns_and_persists_rationale(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "other-agent", {"other-agent": 0.97, "test-agent": 0.02, "none": 0.01}, 0.97)
+    assert cli.cmd_route(_args(t.id)) == 0
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.status == "routed" and loaded.assignee == "other-agent"
+    r = loaded.routing
+    assert r.method == "jev" and r.confidence == "high"
+    assert r.confidence_p == 0.97
+    assert r.scores["other-agent"] == 0.97
+
+
+def test_deterministic_still_wins_before_jev(board, monkeypatch):
+    t = tickets.new_ticket(title="Alpha work", tags=["alpha"])
+    _mock(board, monkeypatch, "other-agent", {"other-agent": 1.0})
+    assert cli.cmd_route(_args(t.id)) == 0
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.assignee == "test-agent" and loaded.routing.method == "deterministic"
+
+
+def test_jev_low_confidence_falls_through_to_claude_mock(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "other-agent", {"other-agent": 0.4, "test-agent": 0.35, "none": 0.25}, 0.4)
+    claude = RouteDecision(chosen_agent_id="test-agent", justification="Claude pick", confidence="high")
+    monkeypatch.setattr(router, "route_with_ai", lambda *a, **k: claude)
+    assert cli.cmd_route(_args(t.id, ai=True)) == 0
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.assignee == "test-agent" and loaded.routing.method == "ai"
+
+
+def test_jev_low_confidence_without_ai_stores_suggestion_only(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "other-agent", {"other-agent": 0.4, "none": 0.3}, 0.4)
+    assert cli.cmd_route(_args(t.id)) == 1
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.status == "open" and loaded.assignee is None
+    assert loaded.routing.method == "jev" and loaded.routing.confidence == "low"
+    assert loaded.routing.confidence_p == 0.4
+
+
+def test_jev_abstain_leaves_unrouted(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "none", {"none": 0.95, "test-agent": 0.05}, 0.95)
+    assert cli.cmd_route(_args(t.id)) == 1
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.assignee is None and loaded.status == "open"
+    assert loaded.routing.method == "jev"
+
+
+def test_jev_abstain_falls_through_to_claude_when_ai_requested(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "none", {"none": 0.95}, 0.95)
+    claude = RouteDecision(chosen_agent_id="other-agent", justification="c", confidence="medium")
+    monkeypatch.setattr(router, "route_with_ai", lambda *a, **k: claude)
+    assert cli.cmd_route(_args(t.id, ai=True)) == 0
+    assert tickets.load_ticket(t.id).routing.method == "ai"
+
+
+def test_jev_unknown_agent_id_is_not_assigned(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "ghost-agent", {"ghost-agent": 1.0})
+    assert cli.cmd_route(_args(t.id)) == 1
+    loaded = tickets.load_ticket(t.id)
+    assert loaded.assignee is None and loaded.status == "open"
+
+
+def test_jev_error_falls_back_to_claude(board, monkeypatch):
+    t = _untagged()
+
+    def boom(*a, **k):
+        raise router.JevUnavailable("Jev call failed: network down")
+
+    monkeypatch.setattr(router, "route_with_jev", boom)
+    claude = RouteDecision(chosen_agent_id="test-agent", justification="c", confidence="high")
+    monkeypatch.setattr(router, "route_with_ai", lambda *a, **k: claude)
+    assert cli.cmd_route(_args(t.id, ai=True)) == 0
+    assert tickets.load_ticket(t.id).routing.method == "ai"
+
+
+def test_jev_error_without_ai_leaves_unrouted(board, monkeypatch):
+    t = _untagged()
+
+    def failing_client(*a):
+        raise ValueError("bad response")
+
+    monkeypatch.setattr(router, "_jev_live_call", failing_client)
+    assert cli.cmd_route(_args(t.id)) == 1
+    assert tickets.load_ticket(t.id).assignee is None
+
+
+def test_jev_client_exception_is_wrapped(workspace):
+    agents_dir, tickets_dir = workspace
+    agents = registry.load_agents(agents_dir)
+    ticket = tickets.new_ticket(title="T", tickets_dir=tickets_dir)
+
+    def boom(*a):
+        raise TimeoutError("slow")
+
+    with pytest.raises(router.JevUnavailable):
+        router.route_with_jev(ticket, agents, client=boom)
+
+
+def test_jev_missing_sdk_is_unavailable_not_a_crash(workspace):
+    """Base install has no Jev SDK; the lazy import must degrade cleanly."""
+    agents_dir, tickets_dir = workspace
+    agents = registry.load_agents(agents_dir)
+    ticket = tickets.new_ticket(title="T", tickets_dir=tickets_dir)
+    with patch.dict(sys.modules, {"pydantic_ai": None}):
+        with pytest.raises(router.JevUnavailable):
+            router.route_with_jev(ticket, agents)
+
+
+def test_backend_env_enables_jev(board, monkeypatch):
+    t = _untagged()
+    _mock(board, monkeypatch, "test-agent", {"test-agent": 1.0})
+    monkeypatch.setenv("SWITCHBOARD_BACKEND", "jev")
+    assert cli.cmd_route(_args(t.id, jev=False)) == 0
+    assert tickets.load_ticket(t.id).routing.method == "jev"
+
+
+def test_old_ticket_without_new_fields_still_loads(tmp_path):
+    (tmp_path / "0001-old.md").write_text(
+        "---\nid: '0001'\ntitle: Old\nstatus: routed\ncreated: 2026-01-01\n"
+        "tags: []\nassignee: test-agent\nrouting:\n  method: ai\n"
+        "  justification: j\n  confidence: high\n  decided_at: 2026-01-01\n---\nbody\n"
+    )
+    t = tickets.load_ticket("0001", tmp_path)
+    assert t.routing.method == "ai"
+    assert t.routing.confidence_p is None and t.routing.scores is None
+    d = RouteDecision(chosen_agent_id=None, justification="j", confidence="low")
+    assert d.confidence_p is None and d.scores is None

@@ -21,7 +21,7 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 
 <div align="center">
 
-| 8 registered agents | 2 runtimes | 9-point self-comparison vs. Livery (author's own, unverified) | 41 tests |
+| 8 registered agents | 2 runtimes | 9-point self-comparison vs. Livery (author's own, unverified) | 61 tests |
 |:---:|:---:|:---:|:---:|
 | One markdown file each | Command string, or a live `claude_code` session | Routing · attempts · concurrency · Talk · Debate · Schedule (declare + install) · Notify | Tests run offline with `SWITCHBOARD_MOCK=1` (no API key); real `--ai`, `talk` and `debate` calls need one |
 
@@ -121,7 +121,12 @@ The author's summary (unverified): Livery appears to have more runtime breadth (
 flowchart TD
     Ticket["New ticket<br/>markdown + tags"] --> Router{"Deterministic<br/>tag-match router"}
     Router -->|"score > 0"| Assign["Assign + record<br/>routing rationale"]
-    Router -->|"score = 0"| AIGate{"--ai flag?"}
+    Router -->|"score = 0"| JevGate{"--jev flag or<br/>SWITCHBOARD_BACKEND=jev?"}
+    JevGate -->|yes| Jev["Jev router<br/>(typed choice + probabilities,<br/>can abstain)"]
+    JevGate -->|no| AIGate
+    Jev -->|"high/medium confidence,<br/>registered agent"| Assign
+    Jev -->|"low / none / error"| AIGate{"--ai flag?"}
+    Jev -.->|"low/none, no --ai:<br/>suggestion stored"| Human
     AIGate -->|yes| Memory[("memory/routing_corrections.jsonl")]
     Memory --> AIRouter["Claude-assisted router<br/>(sees past corrections)"]
     AIGate -->|no| Human["Unrouted -- human triage"]
@@ -212,12 +217,43 @@ session id and real cost tracked:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"      # installs the real `switchboard` command
-cp .env.example .env          # API key: needed for real `route --ai`, `talk`, `debate` (not for tests)
+cp .env.example .env          # API key: needed for real `route --ai`, `talk`, `debate` (not for tests); TYPESAFE_API_KEY for `route --jev`
 ```
+
+## Jev routing backend (optional)
+
+Cascade: deterministic tag match, then Jev (opt-in), then Claude (`--ai`), then a
+human. Jev is TypeSafe's decision model, called through Pydantic AI
+(`Agent(TypeSafeModel('jev-latest'), output_type=<Enum>, instructions=...)`).
+
+- **Enabling:** `--jev` or `SWITCHBOARD_BACKEND=jev`. Needs the Pydantic AI
+  TypeSafe integration installed and `TYPESAFE_API_KEY` set. The SDK is imported
+  lazily, so the base install and the tests work without it; if it is missing
+  or the call fails, routing falls through instead of crashing.
+- **Typed choice:** the output Enum is built per call from the registered agent
+  ids plus a `none` option so Jev can abstain. Each agent's id, name, tags and
+  description go into the instructions (Jev needs explicit criteria; vague
+  prompts give near-uniform probabilities). More than 250 agents (Jev's
+  255-option cap) skips Jev.
+- **Confidence:** `confidence_p` is the minimum of Jev's per-question
+  confidences. Buckets (defined once in `models.confidence_bucket`): `>= 0.8`
+  high, `>= 0.5` medium, otherwise low. High/medium on a registered agent is
+  assigned; low, `none`, an unregistered id, or an error falls through to `--ai`
+  if given, otherwise the ticket stays open with Jev's suggestion stored.
+- **Persisted:** the ticket's `routing` block records `method: jev`,
+  `confidence`, `confidence_p` and `scores` (agent to probability). Older
+  tickets without these fields still load.
+- **Offline mock:** `SWITCHBOARD_JEV_MOCK=path/to/fixture.json` with
+  `{"choice": "<agent id or none>", "provider_details": {"confidence": {"response": 0.9}, "probabilities": {"response": {"<agent id>": 0.9, "none": 0.1}}}}`.
+
+**Honest status:** this backend is tested offline only (mock fixtures and stub
+clients). Live Jev behavior and the response shape were verified separately on
+the standalone router benchmark in `jev-agent-router`, not through Switchboard.
+No live Switchboard + Jev run has been done.
 
 ## Running the tests
 
-The 41 tests run offline (they set `SWITCHBOARD_MOCK=1`, so no API key or
+The 61 tests run offline (they set `SWITCHBOARD_MOCK=1`, so no API key or
 network is needed). Real `route --ai`, `talk` and `debate` calls are not
 mocked outside the tests and do need `ANTHROPIC_API_KEY`. Tested on
 Python 3.9 and 3.14.
@@ -225,7 +261,7 @@ Python 3.9 and 3.14.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest tests/ -v             # 41 passed
+pytest tests/ -v             # 61 passed
 ```
 
 **Risk tiers are advisory.** `risk_tier: medium|high` on an agent only
@@ -249,6 +285,11 @@ switchboard route 0001
 
 # No tag overlap with anything registered? Ask Claude -- it sees past corrections too.
 switchboard route 0005 --ai
+
+# Try Jev between the tag-match router and Claude (see "Jev routing backend" below).
+# Confident pick -> assigned; low confidence / abstain / error -> falls through to --ai if given.
+switchboard route 0005 --jev            # or: SWITCHBOARD_BACKEND=jev switchboard route 0005
+switchboard route 0005 --jev --ai
 
 # Disagree with a routing call? Override it, and teach the router why.
 switchboard reroute 0005 --to exec-status-rollup --reason "..."
@@ -336,7 +377,7 @@ switchboard/
 ├── walkie-talkie/                Debate transcripts (created on first use)
 ├── schedules/                    Declared recurring dispatches, one file each
 ├── ledger.md                     Append-only record of closed tickets
-├── tests/                        Offline (SWITCHBOARD_MOCK=1 stubs the AI calls)
+├── tests/                        Offline (SWITCHBOARD_MOCK=1 stubs the AI calls; SWITCHBOARD_JEV_MOCK / stub clients cover Jev)
 └── ARCHITECTURE.md               Design rationale, decision by decision
 ```
 

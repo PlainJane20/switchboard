@@ -8,13 +8,31 @@ in-memory shape, not a database schema. Git is the database.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 TicketStatus = Literal["open", "routed", "in_progress", "done", "cancelled"]
 RiskTier = Literal["low", "medium", "high"]
-RoutingMethod = Literal["deterministic", "ai", "manual"]
+RoutingMethod = Literal["deterministic", "jev", "ai", "manual"]
+
+# Single source of truth for turning a numeric confidence (0..1, e.g. the
+# minimum of Jev's per-question confidences) into the low/medium/high bucket
+# the cascade acts on.
+CONFIDENCE_HIGH = 0.8
+CONFIDENCE_MEDIUM = 0.5
+Confidence = Literal["low", "medium", "high"]
+
+
+def confidence_bucket(p: Optional[float]) -> Confidence:
+    """>= 0.8 high, >= 0.5 medium, else low. Missing confidence is 'low'."""
+    if p is None:
+        return "low"
+    if p >= CONFIDENCE_HIGH:
+        return "high"
+    if p >= CONFIDENCE_MEDIUM:
+        return "medium"
+    return "low"
 AttemptStatus = Literal["running", "succeeded", "failed"]
 
 
@@ -68,6 +86,9 @@ class RouteDecision(BaseModel):
     )
     justification: str
     confidence: Literal["low", "medium", "high"]
+    # Set by the Jev backend only (the Claude router leaves these null).
+    confidence_p: Optional[float] = None
+    scores: Optional[Dict[str, float]] = None
 
 
 class RoutingRationale(BaseModel):
@@ -85,6 +106,8 @@ class RoutingRationale(BaseModel):
     score: Optional[int] = None
     justification: Optional[str] = None
     confidence: Optional[Literal["low", "medium", "high"]] = None
+    confidence_p: Optional[float] = None
+    scores: Optional[Dict[str, float]] = None
     decided_at: date
 
 

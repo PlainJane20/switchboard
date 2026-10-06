@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -103,6 +104,53 @@ def cmd_ticket_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _try_jev(args, ticket, agents, today):
+    """Jev tier. Returns an exit code if it settled the ticket (assigned it,
+    or -- with no --ai to fall back to -- stored its suggestion), or None to
+    fall through to the next tier."""
+    corrections = memory.load_corrections(limit=10)
+    try:
+        decision = router.route_with_jev(ticket, agents, corrections=corrections)
+    except router.JevUnavailable as e:
+        print(f"Jev router unavailable ({e}) -- falling through.")
+        return None
+    p = "n/a" if decision.confidence_p is None else f"{decision.confidence_p:.2f}"
+    print(f"Jev router: {decision.chosen_agent_id} ({decision.confidence} confidence, p={p})")
+    rationale = RoutingRationale(
+        method="jev",
+        justification=decision.justification,
+        confidence=decision.confidence,
+        confidence_p=decision.confidence_p,
+        scores=decision.scores,
+        decided_at=today,
+    )
+    matched = next((a for a in agents if a.id == decision.chosen_agent_id), None)
+    if decision.chosen_agent_id is not None and matched is None:
+        print(f"Jev chose {decision.chosen_agent_id!r}, which isn't a registered agent id -- falling through.")
+        return None
+    if matched is not None and decision.confidence in ("high", "medium"):
+        tickets.update_ticket(
+            ticket.id, status="routed", assignee=matched.id, routing=rationale
+        )
+        print(f"Ticket {ticket.id} routed to {matched.id}.")
+        return 0
+    if args.ai:
+        reason = "abstained" if matched is None else "low confidence"
+        print(f"Jev {reason} -- falling through to Claude (--ai).")
+        return None
+    if matched is None:
+        print("Jev found no suitable agent -- leaving unrouted for a human to triage.")
+    else:
+        print(
+            "Confidence is low -- recording this as a suggestion, NOT an "
+            "assignment. The ticket stays open. Use `switchboard reroute` "
+            "to actually commit to an agent."
+        )
+    tickets.update_ticket(ticket.id, routing=rationale)
+    notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
+    return 1
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     ticket = tickets.load_ticket(args.ticket_id)
     agents = registry.load_agents()
@@ -119,11 +167,16 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"Ticket {args.ticket_id} routed to {agent.id}.")
         return 0
 
+    if getattr(args, "jev", False) or os.environ.get("SWITCHBOARD_BACKEND") == "jev":
+        outcome = _try_jev(args, ticket, agents, today)
+        if outcome is not None:
+            return outcome
+
     if not args.ai:
         print(
             "No deterministic match (no shared tags with any registered "
-            "agent). Re-run with --ai to ask Claude, or assign manually with "
-            "`switchboard reroute`."
+            "agent). Re-run with --jev or --ai to ask a model, or assign "
+            "manually with `switchboard reroute`."
         )
         notify_mod.notify(f"Ticket {ticket.id} needs triage: {ticket.title}", title="Switchboard: unrouted")
         return 1
@@ -399,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_route = sub.add_parser("route", help="Route a ticket to its best-fit agent")
     p_route.add_argument("ticket_id")
     p_route.add_argument("--ai", action="store_true", help="Fall back to Claude if no deterministic match")
+    p_route.add_argument(
+        "--jev",
+        action="store_true",
+        help="Try Jev (typed choice with probabilities) after the deterministic "
+        "router and before --ai. Also enabled by SWITCHBOARD_BACKEND=jev",
+    )
     p_route.set_defaults(func=cmd_route)
 
     p_reroute = sub.add_parser("reroute", help="Manually override a routing decision; records why for future routing")
