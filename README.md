@@ -14,6 +14,7 @@ File a ticket. Get connected to the right agent, automatically — or told hones
 [![Powered by Claude](https://img.shields.io/badge/Powered_by-Claude-D97757?logo=anthropic&logoColor=white)](https://www.anthropic.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 [![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-6f42c1)](#whats-next)
+[![CI](https://img.shields.io/github/actions/workflow/status/PlainJane20/switchboard/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/PlainJane20/switchboard/actions/workflows/ci.yml)
 
 </div>
 
