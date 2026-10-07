@@ -41,8 +41,8 @@
   <text x="75" y="258" fill="#e2ddf9" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22">or told honestly that none fit.</text>
 
   <g transform="translate(716 168)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="12" font-weight="700">
-    <g transform="translate(0 0)"><rect width="94" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="47" y="26" text-anchor="middle" fill="#e2ddf9">7 agents</text></g>
-    <g transform="translate(104 0)"><rect width="132" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="66" y="26" text-anchor="middle" fill="#e2ddf9">self-improving</text></g>
-    <g transform="translate(246 0)"><rect width="118" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="59" y="26" text-anchor="middle" fill="#e2ddf9">human gated</text></g>
+    <g transform="translate(0 0)"><rect width="94" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="47" y="26" text-anchor="middle" fill="#e2ddf9">8 agents</text></g>
+    <g transform="translate(104 0)"><rect width="132" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="66" y="26" text-anchor="middle" fill="#e2ddf9">correction log</text></g>
+    <g transform="translate(246 0)"><rect width="118" height="42" rx="21" fill="#ffffff" fill-opacity=".1" stroke="#ffffff" stroke-opacity=".18"/><text x="59" y="26" text-anchor="middle" fill="#e2ddf9">opt-in dispatch</text></g>
   </g>
 </svg>
